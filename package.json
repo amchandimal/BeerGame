@@ -1,0 +1,51 @@
+{
+  "name": "angular-beer-game",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "start": "node server/dev.mjs",
+    "build": "node scripts/build-site.mjs && ng build",
+    "test": "tsx --test src/app/game.spec.ts src/app/challenge.spec.ts src/app/rtc-config.spec.ts src/app/game-agent.spec.ts src/app/visibility.spec.ts src/app/lobby.spec.ts src/app/debrief.spec.ts src/app/orders.spec.ts src/app/saves.spec.ts src/app/groups.spec.ts server/signaling.spec.mjs mcp/server.spec.mjs server/http.spec.mjs server/resume.spec.mjs",
+    "mcp": "node mcp/index.mjs",
+    "mcp:install-browser": "playwright install chromium",
+    "test:mcp": "node --test mcp/integration.spec.mjs",
+    "start:server": "node server/index.mjs",
+    "serve": "node server/index.mjs",
+    "release:check": "node scripts/check-release.mjs",
+    "release:package": "node scripts/package-release.mjs",
+    "release:draft": "node scripts/package-release.mjs --draft",
+    "test:resume": "node --test mcp/resume.integration.spec.mjs"
+  },
+  "dependencies": {
+    "@angular/common": "^21.0.0",
+    "@angular/compiler": "^21.0.0",
+    "@angular/core": "^21.0.0",
+    "@angular/forms": "^21.0.0",
+    "@angular/platform-browser": "^21.0.0",
+    "@angular/router": "21.2.25",
+    "@modelcontextprotocol/sdk": "^1.31.0",
+    "playwright": "^1.63.0",
+    "qrcode": "^1.5.4",
+    "rxjs": "~7.8.2",
+    "tslib": "^2.8.1",
+    "ws": "^8.22.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@angular/build": "^21.0.0",
+    "@angular/cli": "^21.0.0",
+    "@angular/compiler-cli": "^21.0.0",
+    "@types/node": "^24.0.0",
+    "@types/qrcode": "^1.5.6",
+    "js-beautify": "1.15.4",
+    "tsx": "^4.20.0",
+    "typescript": "~5.9.3"
+  },
+  "license": "MIT",
+  "author": "Chandimal Adikari",
+  "homepage": "https://beergame.io",
+  "packageManager": "pnpm@11.25.0",
+  "engines": {
+    "node": ">=24 <25"
+  }
+}

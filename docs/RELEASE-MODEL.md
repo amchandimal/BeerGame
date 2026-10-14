@@ -1,0 +1,9 @@
+# Open source plus hosted service
+
+The owner chose the MIT License before the first public release (the project had earlier been prepared under AGPL-3.0-only, and no AGPL version was published). Copyright © 2026 Chandimal Adikari. The full license is in LICENSE. Under MIT, anyone may use, modify, host or sell the software, including in closed form, provided the copyright and license notice are kept. The operator may charge for the hosted beergame.io service. Publishing source is not a license obligation, but each deployed version is still published to the public repository linked from /open-source. The project name, domain and branding are not licensed (see TRADEMARKS.md).
+
+One source tree and simulation engine serve both distributions. Do not describe a proprietary paid edition as implemented: accounts, subscriptions, checkout, invoicing, tenant isolation, persistent classrooms and support SLAs are not present. Those require separate implementation and revised legal/data-processing documentation. Do not promise pricing or SLAs until they are defined and supportable.
+
+Keep hosted infrastructure credentials and operational records outside public Git. Add SaaS features deliberately. Contributions are accepted under MIT; CONTRIBUTING.md grants no copyright assignment. Conduct a dependency-license and secret/history review before publishing the repository. Branding guidance is in TRADEMARKS.md.
+
+The public privacy/terms pages are generated from scripts/build-site.mjs and site.config.json. Their contact, source URL and hosting/retention details are complete for the beergame.io public beta, so `release:check` passes and the pages are no longer marked as drafts. Placing a value containing `TODO_` back in site.config.json restores the draft markers and noindex. The pages describe actual operations but are not a legal certification.

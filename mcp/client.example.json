@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "beer-game": {
+      "command": "node",
+      "args": ["/path/to/BeerGame/mcp/index.mjs"],
+      "env": {
+        "BEER_GAME_URL": "http://127.0.0.1:8787",
+        "BEER_GAME_BROWSER_CHANNEL": "msedge",
+        "BEER_GAME_HEADLESS": "true"
+      }
+    }
+  }
+}

@@ -1,0 +1,2 @@
+// Files and folders that make up the public source release, shared by the release archives and the public repository snapshot.
+export const SOURCE_FILES = ['LICENSE','README.md','AGENTS.md','site.config.json','package.json','pnpm-lock.yaml','pnpm-workspace.yaml','.npmrc','.gitignore','.dockerignore','.env.example','angular.json','tsconfig.json','tsconfig.app.json','proxy.conf.json','Dockerfile','compose.yaml','src','server','mcp','scripts','deploy','docs','CONTRIBUTING.md','SECURITY.md','TRADEMARKS.md','.github'];

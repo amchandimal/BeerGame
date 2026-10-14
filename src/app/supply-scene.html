@@ -1,0 +1,60 @@
+<section class="scene-panel" [class.paused]="paused">
+  <div class="scene-heading"><div><h2>Supply chain</h2><p class="scene-week">{{activityWeek ? 'Showing completed week ' + activityWeek : 'Starting position'}}</p></div><div class="scene-controls"><button type="button" (click)="paused = !paused" [disabled]="!activityWeek || finished" [attr.aria-pressed]="paused"><span aria-hidden="true">{{paused ? '▶' : 'Ⅱ'}}</span> {{paused ? 'Resume animation' : 'Pause animation'}}</button><button type="button" class="board-toggle" (click)="open = !open" [attr.aria-expanded]="open" aria-controls="scene-body">{{open ? 'Hide board' : 'Show board'}}</button></div></div>
+  <div class="scene-body" id="scene-body" [class.collapsed]="!open">
+  <p class="scene-caption">{{activityWeek ? (finished ? 'Week ' + activityWeek + ' complete' : paused ? 'Paused' : 'Playing week ' + activityWeek) : 'Awaiting first order'}}</p>
+  <div class="flow-key"><span>↓ Deliveries</span><span>↑ Orders</span></div>
+  <div class="scene-board">
+    @for (key of [sceneKey]; track key) {
+      <div class="week-timeline" aria-hidden="true">@if (activityWeek) {<div class="week-progress" (animationend)="finished = true"></div>}</div>
+      <svg class="supply-art" viewBox="0 0 540 650" role="img" aria-label="Vertical supply chain: Manufacturer, Distributor, Wholesaler, Retailer, then Customers. Beer deliveries move down and orders move up. Operational details are shown only for roles allowed by your visibility level.">
+        <defs>
+          <symbol id="beer-crate" viewBox="0 0 24 20"><rect x="1" y="3" width="22" height="16" rx="2" fill="#c8a768" stroke="#967841"/><path d="M5 7h14M5 14h14M8 3v16M16 3v16" stroke="#f5dfad" stroke-width="1.5"/></symbol>
+          <symbol id="delivery-truck" viewBox="0 0 66 38"><path d="M4 8h17l9 12v12H4Z" fill="#4e7350"/><path d="M7 11h11l5 8H7Z" fill="#e1eeed"/><rect x="30" y="3" width="33" height="29" rx="3" fill="#a8b98b"/><path d="M36 9h20M36 15h20M36 21h20" stroke="#dce5c8"/><circle cx="15" cy="32" r="6" fill="#36443b"/><circle cx="51" cy="32" r="6" fill="#36443b"/><circle cx="15" cy="32" r="2" fill="#ccd4ca"/><circle cx="51" cy="32" r="2" fill="#ccd4ca"/></symbol>
+          <symbol id="customer" viewBox="0 0 28 55"><circle cx="14" cy="7" r="6" fill="#d5ad83"/><path d="M7 18q7-7 14 0l3 19H4Z" fill="#7c8eaf"/><path d="M9 36l-2 16M19 36l3 16" stroke="#4c5d5b" stroke-width="4"/><path d="M5 20L1 32M22 20l5 12" stroke="#d5ad83" stroke-width="3"/></symbol>
+          <symbol id="warehouse" viewBox="0 0 140 100"><path d="M7 32L70 4l63 28v64H7Z" fill="#e3e9d9" stroke="#98ab82" stroke-width="2"/><path d="M0 32L70 1l70 31" fill="none" stroke="#5e7953" stroke-width="6"/><rect x="21" y="42" width="98" height="54" rx="2" fill="#c3d0b4"/><path d="M21 49h98M21 56h98M21 63h98" stroke="#9eaf8b"/><rect x="25" y="70" width="90" height="26" fill="#586e51"/></symbol>
+          <symbol id="shop" viewBox="0 0 140 100"><rect x="12" y="22" width="116" height="74" rx="3" fill="#ede4cd" stroke="#bdab7f" stroke-width="2"/><rect x="28" y="58" width="38" height="38" fill="#5e7a70"/><rect x="76" y="58" width="37" height="25" fill="#b6d1ce"/><path d="M8 44h124l-7-22H15Z" fill="#819765"/><path d="M25 23l-3 21M49 23l-1 21M73 23l1 21M97 23l3 21M119 23l5 21" stroke="#edf0d9" stroke-width="11"/><rect x="31" y="3" width="78" height="17" rx="3" fill="#576e47"/><text x="70" y="15" text-anchor="middle" fill="white" font-size="10">BEER STORE</text></symbol>
+          <symbol id="factory" viewBox="0 0 140 100"><rect x="105" y="3" width="16" height="66" fill="#8c9e83"/><path d="M6 41l40-21v21l41-21v21h47v55H6Z" fill="#dee5d5" stroke="#8b9e7e" stroke-width="2"/><rect x="16" y="56" width="28" height="21" fill="#a6c7c2"/><rect x="52" y="56" width="28" height="21" fill="#a6c7c2"/><rect x="91" y="62" width="32" height="34" fill="#63795a"/></symbol>
+        </defs>
+        <rect x="3" y="3" width="534" height="644" rx="18" fill="#f4f7ec"/>
+        <path d="M44 65V553" stroke="#d7dfcf" stroke-width="34" stroke-linecap="round"/>
+        <path d="M44 65V553" stroke="#fff" stroke-width="2" stroke-dasharray="8 10"/>
+        <path d="M82 548V79m-5 7 5-7 5 7" stroke="#b9a06b" stroke-width="2" stroke-dasharray="4 5" fill="none"/>
+        @for (p of displayParties; track p.role; let row = $index) {
+          @let i = 3 - row;
+          <g class="station" [class.your-station]="p.role === game.player" [attr.transform]="'translate(0,' + (22 + row * 143) + ')'">
+            <path d="M44 57H112" stroke="#d7dfcf" stroke-width="14"/>
+            <rect class="station-card" x="104" y="0" width="422" height="114" rx="14"/>
+            <use [attr.href]="i === 0 ? '#shop' : i === 3 ? '#factory' : '#warehouse'" x="117" y="15" width="105" height="70"/>
+            @if (canSee(p.role)) { @for (crate of crates(p.inventory); track crate) {<use href="#beer-crate" [attr.x]="120 + crate % 6 * 16" [attr.y]="86 + (crate < 6 ? 0 : 11)" width="14" height="11"/>} }
+            <text x="237" y="20" class="player-marker">{{marker(p.role)}}</text>
+            <text x="237" y="43" class="party-name">{{p.role}}</text>
+            @if (canSee(p.role)) { <text x="237" y="65" class="stock-label">{{p.inventory}} cases in stock</text>
+            <text x="237" y="84" class="count">{{p.received}} in · {{p.shipped}} out · {{p.backlog}} waiting</text>
+            <text x="237" y="102" class="station-note">{{i === 3 ? 'Production: 2 weeks' : p.order + ' cases ordered'}}</text> } @else {<text x="237" y="72" class="station-note">Information hidden</text>}
+            @if (activityWeek && canSee(p.role) && p.received > 0) {<g class="stock-in"><use href="#beer-crate" x="94" y="68" width="21" height="18"/></g>}
+            @if (activityWeek && canSee(p.role) && p.shipped > 0) {<g class="stock-out"><use href="#beer-crate" x="150" y="68" width="21" height="18"/></g>}
+            @if (i > 0 && (canSee(p.role) || canSee(game.parties[i - 1].role))) {
+              <text x="113" y="132" class="lead-label">↓ Delivery · 2 weeks</text>
+              <text x="340" y="132" class="lead-label">↑ Order · 1 week</text>
+            }
+            @if (i < 3 && activityWeek && canSee(p.role) && p.received > 0) {
+              <g transform="translate(44,-86)"><g class="truck-drive"><g transform="rotate(-90)"><use href="#delivery-truck" x="-23" y="-13" width="46" height="27"/></g></g></g>
+            }
+            @if (i < 3 && activityWeek && canSee(p.role) && p.order > 0) {
+              <g transform="translate(82,57)"><g class="order-note"><rect x="-6" y="-8" width="12" height="16" rx="2" fill="#f5e4b8" stroke="#b3a36c"/><path d="M-3-4h6m-6 4h6" stroke="#b3a36c"/></g></g>
+            }
+          </g>
+        }
+        <path d="M169 568v30m-5-6 5 6 5-6" stroke="#a9ba98" stroke-width="2" fill="none"/>
+        <use href="#customer" x="113" y="601" width="22" height="42"/><use href="#customer" x="141" y="601" width="22" height="42"/>
+        @if (activityWeek && canSee('Retailer')) {<g class="customer-walk"><use href="#customer" x="174" y="601" width="22" height="42"/>@if (game.parties[0].shipped > 0) {<use href="#beer-crate" x="195" y="621" width="17" height="14"/>}</g>}
+        <text x="237" y="596" class="party-name">Customers</text>
+        @if (canSee('Retailer')) { <text x="237" y="617" class="count">{{game.parties[0].shipped}} served · {{game.parties[0].backlog}} waiting</text>
+        <text x="237" y="636" class="station-note">{{activityWeek ? game.history[activityWeek - 1].demand : game.demand()}} cases demanded · same-week purchases</text> } @else {<text x="237" y="617" class="station-note">Demand information hidden</text>}
+      </svg>
+    }
+  </div>
+  <details class="delivery-details"><summary>Delivery schedule & lead times <span aria-hidden="true">＋</span></summary><div class="delivery-grid">@for (p of game.parties; track p.role; let i = $index) { @if (canSee(p.role)) {<div><strong>{{i === 3 ? 'Production → Manufacturer' : rolesLabel(i)}}</strong><span>Due {{game.complete ? 'after game' : 'week ' + game.week}}: <b>{{p.shipments[0]}} cases</b></span><span>Due {{game.complete ? 'after game + 1 week' : 'week ' + (game.week + 1)}}: <b>{{p.shipments[1]}} cases</b></span></div>} }</div>
+  <p class="timing-note">A one-week order delay plus a two-week delivery delay means a <strong>minimum three-week replenishment time</strong> between parties, provided the supplier has stock. Backlogs can extend this. Crates are symbolic; labels show exact quantities.</p></details>
+  </div>
+</section>

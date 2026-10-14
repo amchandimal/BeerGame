@@ -1,0 +1,9 @@
+{
+  "origin": "https://beergame.io",
+  "operator": "Chandimal Adikari",
+  "country": "Australia",
+  "contactEmail": "skillidaus@gmail.com",
+  "sourceUrl": "https://github.com/amchandimal/beergame",
+  "hostingDisclosure": "The website and multiplayer server run on Oracle Cloud Infrastructure in the India South (Hyderabad) region, so information handled by the server is processed in India. The web server keeps access and error logs (IP address, time, requested address, referring page and browser details) for 14 days to operate and secure the service, then deletes them. The game server itself does not log players.",
+  "effectiveDate": "2026-10-14"
+}

@@ -1,0 +1,36 @@
+{
+  "/signaling": {
+    "target": "http://127.0.0.1:8787",
+    "ws": true
+  },
+  "/rtc-config": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/about": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/how-to-play": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/open-source": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/privacy": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/terms": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/site.css": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/robots.txt": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/sitemap.xml": {
+    "target": "http://127.0.0.1:8787"
+  },
+  "/LICENSE.txt": {
+    "target": "http://127.0.0.1:8787"
+  }
+}
