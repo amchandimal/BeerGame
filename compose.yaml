@@ -6,7 +6,10 @@ services:
     environment:
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-https://beergame.io}
       INDEXABLE: ${INDEXABLE:-false}
-      STUN_URLS: ${STUN_URLS:-stun:stun.l.google.com:19302}
+      STUN_URLS: ${STUN_URLS:-}
+      CLOUDFLARE_TURN_KEY_ID: ${CLOUDFLARE_TURN_KEY_ID:-}
+      CLOUDFLARE_TURN_KEY_API_TOKEN: ${CLOUDFLARE_TURN_KEY_API_TOKEN:-}
+      TURN_TTL_SECONDS: ${TURN_TTL_SECONDS:-}
       TURN_URLS: ${TURN_URLS:-}
       TURN_USERNAME: ${TURN_USERNAME:-}
       TURN_PASSWORD: ${TURN_PASSWORD:-}

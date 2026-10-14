@@ -14,18 +14,81 @@ export function joinCode(input, host) {
   const digits = text.replace(/[\s.·\-\u2010-\u2015]/g, '');
   return /^\d{6}$/.test(digits) ? digits : null;
 }
+// Short-lived Cloudflare TURN servers for one room member, with port 53 (blocked by browsers) dropped; STUN comes from /rtc-config. Errors carry no secrets or response text.
+export async function cloudflareIce({ keyId, token, ttl }, request = fetch) {
+  let response, body;
+  try {
+    response = await request(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/generate-ice-servers`, { method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' }, body: JSON.stringify({ ttl }), signal: AbortSignal.timeout(3000) });
+    if (response.ok) body = await response.json();
+  } catch (e) { throw new Error(e?.name === 'TimeoutError' ? 'timed out after 3 seconds' : 'request failed'); }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+  const iceServers = (Array.isArray(body?.iceServers) ? body.iceServers : []).flatMap(s => {
+    const urls = [s?.urls].flat().filter(url => typeof url === 'string' && /^turns?:/.test(url) && !/:53(?:\?|$)/.test(url));
+    return urls.length && typeof s.username === 'string' && typeof s.credential === 'string' ? [{ urls, username: s.username, credential: s.credential }] : [];
+  });
+  if (!iceServers.length) throw new Error('no TURN servers in the response');
+  return iceServers;
+}
+// Revokes one Cloudflare TURN credential (by its username) before it expires: one attempt, 3-second timeout. Errors carry no secrets or response text.
+export async function revokeCloudflareIce({ keyId, token }, username, request = fetch) {
+  let response;
+  try { response = await request(`https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(keyId)}/credentials/${encodeURIComponent(username)}/revoke`, { method: 'POST', headers: { Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(3000) }); }
+  catch (e) { throw new Error(e?.name === 'TimeoutError' ? 'timed out after 3 seconds' : 'request failed'); }
+  if (!response.ok) throw new Error(`HTTP ${response.status}`);
+}
 // finishedMs: how long a finished room still admits returning players, so one who missed the reveal receives the final results.
-export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayMs = 60000, finishedMs = 30 * 60 * 1000 } = {}) {
+// turnFetch, turnPerMinute: the Cloudflare TURN requests (replaced in tests) and the server-wide cap on credentials issued per minute. revealGraceMs: how long after the reveal players' credentials are revoked.
+export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayMs = 60000, finishedMs = 30 * 60 * 1000, turnFetch = fetch, turnPerMinute = 120, revealGraceMs = 30000 } = {}) {
   const production = process.env.NODE_ENV === 'production';
   const publicOrigin = process.env.PUBLIC_ORIGIN;
   if (production && (!publicOrigin || new URL(publicOrigin).protocol !== 'https:')) throw new Error('Production requires PUBLIC_ORIGIN=https://your-domain');
+  const { CLOUDFLARE_TURN_KEY_ID: keyId, CLOUDFLARE_TURN_KEY_API_TOKEN: token, TURN_TTL_SECONDS: ttl, STUN_URLS, TURN_URLS } = process.env; // Empty values (as Compose passes them) count as unset.
+  const cloudflare = keyId || token ? { keyId, token, ttl: Number(ttl || 10800) } : null; // Credentials go only to room members, over their signaling socket.
+  if (cloudflare && (!keyId || !token)) throw new Error('Set both CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_KEY_API_TOKEN, or neither.');
+  if (cloudflare && TURN_URLS) throw new Error('Configure either Cloudflare TURN (CLOUDFLARE_TURN_KEY_ID) or static TURN_URLS, not both.');
+  if (cloudflare && !(Number.isInteger(cloudflare.ttl) && cloudflare.ttl > 0)) throw new Error('TURN_TTL_SECONDS must be a whole number of seconds.');
+  const publicIce = [{ urls: (STUN_URLS || (cloudflare ? 'stun:stun.cloudflare.com:3478' : 'stun:stun.l.google.com:19302')).split(',') }];
+  if (TURN_URLS) publicIce.push({ urls: TURN_URLS.split(','), username: process.env.TURN_USERNAME || '', credential: process.env.TURN_PASSWORD || '' }); // Static TURN for self-hosters.
   const rooms = new Map();
   const ended = new Map(); // Codes of recently closed rooms, so a late join is told the game ended.
   const clients = new Map();
   // A join failure with a reason the client turns into a next action: invalid, unknown, ended, started or full.
   const refuse = (reason, message) => Object.assign(new Error(message), { reason });
   const webRoot = resolve(fileURLToPath(new URL('../dist/beer-game/browser/', import.meta.url)));
-  const send = (socket, data) => { if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); };
+  const held = new WeakMap(); // Socket → messages queued until its TURN credentials have gone first (at most 3 seconds).
+  const send = (socket, data) => { if (held.has(socket)) held.get(socket).push(data); else if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(data)); };
+  const issued = new WeakSet(); let iceWindow = { start: 0, count: 0 };
+  // Best effort: a failure is logged without secrets and never retried; the credential then expires after its TTL.
+  const revokeNames = names => { for (const username of names) revokeCloudflareIce(cloudflare, username, turnFetch).catch(e => console.warn(`Cloudflare TURN credential not revoked (${e.message}); it expires on its own.`)); };
+  // client.turn: the usernames issued to the member's current (or last) connection, in memory only and never logged; names is null while the request is in flight.
+  const revoke = client => { const turn = client.turn; client.turn = null; if (turn?.names) revokeNames(turn.names); };
+  // One Cloudflare request per connection, within the server-wide cap. Its `ice` message precedes whatever is queued for that socket meanwhile (session, room, signals); on failure the player continues with STUN only.
+  const issueIce = client => {
+    const socket = client.socket;
+    if (!cloudflare || issued.has(socket)) return;
+    issued.add(socket);
+    if (Date.now() - iceWindow.start >= 60000) iceWindow = { start: Date.now(), count: 0 };
+    if (iceWindow.count++ === turnPerMinute) console.warn(`Cloudflare TURN: ${turnPerMinute} credentials issued this minute; further players use STUN only until the next minute.`);
+    if (iceWindow.count > turnPerMinute) return;
+    held.set(socket, []);
+    const turn = client.turn = { names: null };
+    cloudflareIce(cloudflare, turnFetch).then(iceServers => {
+      turn.names = [...new Set(iceServers.map(s => s.username))];
+      if (client.turn === turn) return [{ type: 'ice', iceServers }];
+      revokeNames(turn.names); return []; // Left, removed or replaced while the request was in flight.
+    }, e => { console.warn(`Cloudflare TURN credentials unavailable (${e.message}); the player continues with STUN only.`); if (client.turn === turn) client.turn = null; return []; })
+      .then(first => { const queued = held.get(socket); held.delete(socket); for (const data of [...first, ...queued]) send(socket, data); });
+  };
+  // Credentials only for a member with an online counterpart to connect to: the host once any guest is online, a guest once the host is, never a member alone. Runs whenever a member comes online (create, join, resume).
+  const issueNeeded = room => {
+    const online = m => m.socket.readyState === WebSocket.OPEN, host = room.members.get(room.host), members = [...room.members.values()];
+    for (const m of members) if (online(m) && (m === host ? members.some(o => o !== m && online(o)) : online(host))) issueIce(m);
+  };
+  // After the reveal players need no relay: their credentials are revoked once the final snapshot has had time to arrive (at once if they disconnect first). The host's stays while the finished room admits returning players (who get their own on resume) and goes when it expires, the host leaves or disconnects.
+  const revokeAfterReveal = room => {
+    const live = [...room.members.values()].filter(m => m.id !== room.host && m.turn).map(m => [m, m.turn]);
+    if (live.length) setTimeout(() => { for (const [m, turn] of live) if (m.turn === turn) revoke(m); }, revealGraceMs).unref();
+  };
   const roomView = room => ({ name: room.name, code: room.code, visibility: room.visibility, kind: room.kind, hostPlays: room.hostPlays, challenge: room.challenge, host: room.host, started: room.started, humanRoles: room.humanRoles, automated: room.automated, waiting: room.waiting, takeBack: room.takeBack, absentAtStart: room.absentAtStart, groups: room.kind === 'groups' ? room.groups : undefined, members: [...room.members.values()].map(m => ({ id: m.id, role: m.role, nickname: m.nickname, online: m.socket.readyState === WebSocket.OPEN, connection: m.connection, left: !!m.left, ...(room.kind === 'groups' ? { group: m.group } : {}) })) });
   const broadcast = room => { for (const m of room.members.values()) send(m.socket, { type: 'room', room: roomView(room) }); };
   // In a started Team game (or a group of a Classroom Group Challenge) a guest's seat outlives leaving; the creator decides whether the system plays it.
@@ -35,17 +98,17 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
   const removeMember = client => {
     const room = client.room;
     if (!room) return;
-    client.room = null; room.members.delete(client.id);
+    client.room = null; room.members.delete(client.id); revoke(client);
     if (client.id === room.host) {
       rooms.delete(room.code); ended.set(room.code, Date.now());
       if (ended.size > 10000) ended.delete(ended.keys().next().value);
-      for (const m of room.members.values()) { send(m.socket, { type: 'closed', message: 'The host ended the supply chain or its reconnect window expired.' }); m.room = null; m.role = null; }
+      for (const m of room.members.values()) { send(m.socket, { type: 'closed', message: 'The host ended the supply chain or its reconnect window expired.' }); m.room = null; m.role = null; revoke(m); }
     } else broadcast(room);
   };
   const expireRooms = () => {
     for (const room of rooms.values()) if (room.finished && Date.now() - room.finishedAt >= finishedMs) { // Players on their final screens keep them.
       rooms.delete(room.code); ended.set(room.code, Date.now());
-      for (const m of room.members.values()) m.room = null;
+      for (const m of room.members.values()) { m.room = null; revoke(m); }
     }
     for (const room of rooms.values()) for (const member of room.members.values()) {
       if (member.disconnectedAt && Date.now() - member.disconnectedAt >= reconnectMs) removeMember(member);
@@ -68,11 +131,9 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
       return;
     }
     if (pathname === '/healthz') { res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }); res.end(req.method === 'HEAD' ? undefined : '{"status":"ok"}'); return; }
-    if (pathname === '/rtc-config') {
-      const iceServers = [{ urls: (process.env.STUN_URLS || 'stun:stun.l.google.com:19302').split(',') }];
-      if (process.env.TURN_URLS) iceServers.push({ urls: process.env.TURN_URLS.split(','), username: process.env.TURN_USERNAME || '', credential: process.env.TURN_PASSWORD || '' });
+    if (pathname === '/rtc-config') { // Never Cloudflare credentials: those go only to room members.
       res.writeHead(200, { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
-      res.end(JSON.stringify({ iceServers })); return;
+      res.end(JSON.stringify({ iceServers: publicIce })); return;
     }
     try {
       const pages = new Set(['/about', '/how-to-play', '/open-source', '/privacy', '/terms']);
@@ -97,7 +158,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
   const wss = new WebSocketServer({ server, path: '/signaling', maxPayload: 65536, verifyClient: ({ origin }) => clients.size < 1000 && (!publicOrigin || origin === publicOrigin) });
   wss.on('connection', (socket, req) => {
     const site = req.headers.host ?? ''; // Invitation links pasted as a code must point at this site.
-    let client = { id: randomUUID(), token: randomUUID(), connection: 1, socket, room: null, role: null, group: null, nickname: '', attempts: [], alive: true, messageCount: 0, windowStart: Date.now() };
+    let client = { id: randomUUID(), token: randomUUID(), connection: 1, socket, room: null, role: null, group: null, nickname: '', attempts: [], alive: true, messageCount: 0, windowStart: Date.now(), turn: null };
     clients.set(client.id, client);
     send(socket, { type: 'welcome', id: client.id });
     socket.on('pong', () => { client.alive = true; });
@@ -122,6 +183,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           if (!member) { send(socket, { type: 'resume-unavailable', message: removed === 'removed' ? 'The host removed you from this game before it started. You can join another game.' : removed === 'finished' ? 'This game is over and its results are no longer available. You can create or join another game.' : removed ? 'The host started this game without you. You can join another game.' : 'This saved game has ended or expired. You can create or join another game.' }); return; }
           clients.delete(client.id);
           const oldSocket = member.socket;
+          revoke(member); // The previous connection's credential: Resume and Reconnect rebuild every peer from fresh configuration.
           client = member; client.socket = socket; client.disconnectedAt = 0; client.left = false; client.connection++; client.alive = true;
           const chain = chainOf(room, client.group);
           if (chain) {
@@ -130,9 +192,9 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           }
           clients.set(client.id, client);
           if (oldSocket !== socket) oldSocket.close(4001, 'Session resumed in another tab');
-          send(socket, { type: 'session', id: client.id, token: client.token }); broadcast(room);
+          issueNeeded(room); send(socket, { type: 'session', id: client.id, token: client.token }); broadcast(room);
         } else if (msg.type === 'leave') {
-          if (client.room && teamInPlay(client.room) && client.id !== client.room.host) { client.left = true; socket.close(1000, 'Left the game'); }
+          if (client.room && teamInPlay(client.room) && client.id !== client.room.host) { client.left = true; revoke(client); socket.close(1000, 'Left the game'); }
           else removeMember(client);
         } else if (msg.type === 'decide') {
           // In a Classroom Group Challenge the host names the group; a player decides only for their own group.
@@ -149,7 +211,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           const room = client.room, chain = room && chainOf(room, msg.group); // The host's week advanced, so a returned player plays from the new week.
           if (room?.host === client.id && chain?.takeBack.includes(msg.role)) { delete chain.automated[msg.role]; chain.takeBack = chain.takeBack.filter(role => role !== msg.role); broadcast(room); }
         } else if (msg.type === 'finished') {
-          if (client.room?.host === client.id && !client.room.finished) { client.room.finished = true; client.room.finishedAt = Date.now(); }
+          if (client.room?.host === client.id && !client.room.finished) { client.room.finished = true; client.room.finishedAt = Date.now(); revokeAfterReveal(client.room); }
         } else if (msg.type === 'create' || msg.type === 'join') {
           if (client.room) throw new Error('Already in a supply chain. Leave it before joining another.');
           const name = typeof msg.name === 'string' ? msg.name.trim() : '';
@@ -190,7 +252,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           }
           client.role = room.kind === 'classroom' && (client.id !== room.host || room.hostPlays) ? room.challenge.role : null; client.group = null;
           client.room = room; room.members.set(client.id, client);
-          send(socket, { type: 'session', id: client.id, token: client.token }); broadcast(room);
+          issueNeeded(room); send(socket, { type: 'session', id: client.id, token: client.token }); broadcast(room);
          } else if (msg.type === 'nickname') {
           const room = client.room;
           const nickname = typeof msg.nickname === 'string' ? msg.nickname.trim() : '';
@@ -229,7 +291,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           if (!room || room.host !== client.id || room.started) throw new Error('Only the host can remove players, and only before the game starts.');
           if (!member || member.id === room.host) throw new Error('That player is not in this lobby.');
           if (member.socket.readyState === WebSocket.OPEN) throw new Error(`${member.nickname || 'That player'} is connected again.`);
-          room.members.delete(member.id); room.removed.set(member.token, 'removed'); broadcast(room);
+          room.members.delete(member.id); room.removed.set(member.token, 'removed'); revoke(member); broadcast(room);
         } else if (msg.type === 'started') {
           const room = client.room;
           if (!room || room.host !== client.id) throw new Error('Only the host can start.');
@@ -244,7 +306,7 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
           if (room.started) throw new Error('This game has already started.');
           if (staying.some(m => !m.nickname)) throw new Error('Every player must enter a nickname.');
           if (staying.some(m => m.socket.readyState !== WebSocket.OPEN)) throw new Error('Wait for every player to reconnect.');
-          for (const m of without) if (!kept.includes(m)) { room.members.delete(m.id); room.removed.set(m.token, 'started-without'); }
+          for (const m of without) if (!kept.includes(m)) { room.members.delete(m.id); room.removed.set(m.token, 'started-without'); revoke(m); }
           const seated = [...room.members.values()].filter(m => players.includes(m) || kept.includes(m));
           if (room.kind === 'groups') {
             room.groups = room.groups.filter(g => seated.some(m => m.group === g.id)); // Empty groups are dropped.
@@ -260,8 +322,9 @@ export function createSignalingServer({ reconnectMs = 24 * 60 * 60 * 1000, awayM
       } catch (e) { send(socket, { type: 'error', message: e.message || 'Invalid request.', request, reason: e.reason }); }
     });
     socket.on('close', () => {
-      if (client.socket !== socket) return;
+      if (client.socket !== socket) return; // An old socket a resume replaced: the new connection keeps its credential.
       clients.delete(client.id);
+      revoke(client); // The browser closes its peers when signaling drops; Resume and Reconnect get fresh credentials when needed.
       const room = client.room;
       if (!room) return;
       const at = client.disconnectedAt = Date.now();

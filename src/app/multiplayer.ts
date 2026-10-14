@@ -1,7 +1,7 @@
 import { ChallengeConfig, DemandConfig, demandScenario, ScoreRow, rankScores, scoreStatus } from './challenge';
 import { signal } from '@angular/core';
 import { BeerGame, Party, Role, ROLES } from './game';
-import { loadRtcConfig } from './rtc-config';
+import { loadRtcConfig, validIceServers, withTurn } from './rtc-config';
 import { InformationVisibility, dataScope, visibleHistory, visibleParties, visiblePending, visibleRoles, hiddenParty } from './visibility';
 import { list, lobbyStatus, lobbySummary, startReview, startWithoutPrompt } from './lobby';
 import { SavedSession, readSaves, removeSave, restoreGame, saveKey, writeSave } from './saves';
@@ -23,7 +23,8 @@ export function chainView(room: Room, group: string | null | undefined): Room | 
 // This player's order for the current week: sending, unconfirmed (no reply yet, so it can be sent again), interrupted (no connection to the host) or accepted by the host.
 export interface OrderStatus { week: number; amount: number; state: 'sending' | 'unconfirmed' | 'interrupted' | 'accepted'; waitingFor: string[]; message: string; canRetry: boolean; }
 export const ACK_MS = 5000; // Without the host's reply by then, the order can be sent again.
-interface Peer { pc: RTCPeerConnection; channel?: RTCDataChannel; candidates: RTCIceCandidateInit[]; }
+// config: the configuration the peer gathers candidates with; an older one than this session's means TURN servers arrived after it was created.
+interface Peer { pc: RTCPeerConnection; channel?: RTCDataChannel; candidates: RTCIceCandidateInit[]; config: RTCConfiguration; }
 interface Snapshot { type: 'state'; scenario?: readonly number[]; customer?: readonly number[]; week: number; history: { week: number; demand: number | null; parties: Party[] }[]; parties: Party[]; pending: Partial<Record<Role, number>>; submittedRoles: Role[]; revealed?: boolean; }
 // A saved game's availability: checking, available, unverified (the check could not finish), or ending (End game for everyone is in progress).
 export type SaveCheck = 'checking' | 'available' | 'unverified' | 'ending';
@@ -316,6 +317,10 @@ export class MultiplayerSession {
   private sendSignal(message: object) { if (this.socket?.readyState === WebSocket.OPEN) this.socket.send(JSON.stringify(message)); }
   private async handleSignaling(msg: any) {
     if (msg.type === 'welcome') this.id = msg.id;
+    if (msg.type === 'ice' && validIceServers(msg.iceServers)) { // Sent once a counterpart is online and before the messages that create its peer, so peers normally start with the relay.
+      this.config = withTurn(this.config, msg.iceServers);
+      for (const [id, peer] of this.peers) if (peer.pc.connectionState === 'failed') await this.restartIce(id, peer); // A peer that already failed without it tries again; others use it if they fail later.
+    }
     if (msg.type === 'session') { this.id = msg.id; this.token = msg.token; }
     if (msg.type === 'resume-unavailable') { this.restoring = null; this.forgetSaved(); this.error = msg.message; this.status = 'Saved game unavailable'; }
     if (msg.type === 'error') { const field = ({ nickname: 'nickname', join: 'code', 'group-create': 'group' } as const)[msg.request as string]; if (field) this.fieldError(field, msg.message, msg.reason ?? null); else this.error = msg.message; this.status =this.room ? this.room.started ? 'Multiplayer game' : 'Supply chain lobby' : 'Could not join supply chain'; }
@@ -390,11 +395,12 @@ export class MultiplayerSession {
   }
   private async makePeer(id: string, initiator: boolean) {
     const pc = new RTCPeerConnection(this.config);
-    const peer: Peer = { pc, candidates: [] };
+    const peer: Peer = { pc, candidates: [], config: this.config };
     this.peers.set(id, peer);
     pc.onicecandidate = event => { if (event.candidate) this.sendSignal({ type: 'signal', to: id, signal: { candidate: event.candidate.toJSON() } }); };
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed') this.error = 'WebRTC connection failed. A TURN relay may be needed for this network.';
+      if (pc.connectionState === 'failed' && peer.config !== this.config) void this.restartIce(id, peer); // Created before this connection's TURN servers arrived.
+      else if (pc.connectionState === 'failed' && !this.revealed) this.error = 'WebRTC connection failed. A TURN relay may be needed for this network.'; // After the reveal the server revokes relay credentials, so a drop is expected.
       this.update();
     };
     const attach = (channel: RTCDataChannel) => {
@@ -414,6 +420,15 @@ export class MultiplayerSession {
       this.sendSignal({ type: 'signal', to: id, signal: { description: pc.localDescription } });
     }
     return peer;
+  }
+  // Gathers candidates again with the current configuration (now with TURN) and renegotiates; the other side answers as it does any offer.
+  private async restartIce(id: string, peer: Peer) {
+    peer.config = this.config;
+    try {
+      peer.pc.setConfiguration(this.config);
+      await peer.pc.setLocalDescription(await peer.pc.createOffer({ iceRestart: true }));
+      this.sendSignal({ type: 'signal', to: id, signal: { description: peer.pc.localDescription } });
+    } catch { this.error = 'WebRTC connection failed. A TURN relay may be needed for this network.'; this.update(); }
   }
   private receive(id: string, msg: any) {
     const fromHost = !this.isHost && id === this.room?.host;

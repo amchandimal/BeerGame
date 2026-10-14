@@ -503,3 +503,398 @@ test('Classroom Group Challenge: players create, join and switch groups with uni
     wss.close(); await new Promise(resolve => server.close(resolve));
   }
 });
+
+// Cloudflare TURN: the server reads its environment once, at creation; the tests replace the Cloudflare request, so nothing leaves this machine.
+const cloudflareEnv = { CLOUDFLARE_TURN_KEY_ID: 'key-id-4711', CLOUDFLARE_TURN_KEY_API_TOKEN: 'api-token-secret-4711' };
+function withEnv(env, create) {
+  const keys = ['CLOUDFLARE_TURN_KEY_ID', 'CLOUDFLARE_TURN_KEY_API_TOKEN', 'TURN_TTL_SECONDS', 'STUN_URLS', 'TURN_URLS', 'TURN_USERNAME', 'TURN_PASSWORD'], old = keys.map(key => process.env[key]);
+  for (const key of keys) if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key];
+  try { return create(); } finally { keys.forEach((key, i) => { if (old[i] === undefined) delete process.env[key]; else process.env[key] = old[i]; }); }
+}
+// Cloudflare's answer, including the alternate port-53 URLs browsers block.
+const cloudflareAnswer = n => new Response(JSON.stringify({ iceServers: [{ urls: ['stun:stun.cloudflare.com:3478', 'stun:stun.cloudflare.com:53'] }, { urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turn:turn.cloudflare.com:53?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'], username: `cf-user-${n}`, credential: `cf-credential-${n}` }] }), { status: 201, headers: { 'content-type': 'application/json' } });
+const turnFor = n => [{ urls: ['turn:turn.cloudflare.com:3478?transport=udp', 'turns:turn.cloudflare.com:443?transport=tcp'], username: `cf-user-${n}`, credential: `cf-credential-${n}` }];
+async function turnClient(server) {
+  const socket = new WebSocket(`ws://127.0.0.1:${server.address().port}/signaling`), messages = [];
+  socket.on('message', raw => messages.push(JSON.parse(raw.toString())));
+  const receive = async (predicate, ms = 5000) => { for (const end = Date.now() + ms; Date.now() < end; await new Promise(r => setTimeout(r, 5))) { const found = messages.find(predicate); if (found) return found; } throw new Error('Timed out waiting for signaling message'); };
+  await receive(m => m.type === 'welcome');
+  return { socket, messages, receive, types: () => messages.map(m => m.type), send: data => socket.send(JSON.stringify(data)) };
+}
+function captureLogs() {
+  const lines = [], original = { log: console.log, warn: console.warn, error: console.error };
+  for (const level of Object.keys(original)) console[level] = (...args) => lines.push(`${level}: ${args.join(' ')}`);
+  return { lines, restore: () => Object.assign(console, original) };
+}
+const secrets = n => [cloudflareEnv.CLOUDFLARE_TURN_KEY_API_TOKEN, cloudflareEnv.CLOUDFLARE_TURN_KEY_ID, ...Array.from({ length: n }, (_, i) => [`cf-user-${i + 1}`, `cf-credential-${i + 1}`]).flat()];
+// A stand-in for the Cloudflare API: generate-ice-servers answers with numbered credentials (after delays[n] ms for request n), revoke with 204 or revokeAnswer(n) for the nth revocation.
+function fakeCloudflare({ delays = {}, revokeAnswer = () => new Response(null, { status: 204 }) } = {}) {
+  const issued = [], revoked = [];
+  const fetch = async (url, init) => {
+    const username = url.match(/\/credentials\/([^/]+)\/revoke$/)?.[1];
+    if (username) { revoked.push({ url, init, username: decodeURIComponent(username) }); return revokeAnswer(revoked.length, init); }
+    const n = issued.push({ url, init });
+    if (delays[n]) await new Promise(r => setTimeout(r, delays[n]));
+    return cloudflareAnswer(n);
+  };
+  return { fetch, issued, revoked, names: () => revoked.map(r => r.username) };
+}
+const until = async (condition, ms = 5000) => { for (const end = Date.now() + ms; !condition(); await new Promise(r => setTimeout(r, 5))) if (Date.now() > end) throw new Error('Timed out waiting for a condition'); };
+const pause = ms => new Promise(r => setTimeout(r, ms));
+const sessionOf = async (client, message) => { client.send(message); return client.receive(m => m.type === 'session'); };
+
+test('Cloudflare TURN: /rtc-config has Cloudflare STUN only; a member alone gets no credentials; the host gets them before the room that lists the first online guest, a guest before session once the host is online, also on resume; one request per connection; a server-wide cap; no secrets logged', async () => {
+  const cf = fakeCloudflare(), logs = captureLogs();
+  // Empty values, as Compose passes unset ones, mean the defaults.
+  const { server, wss } = withEnv({ ...cloudflareEnv, TURN_TTL_SECONDS: '', STUN_URLS: '', TURN_URLS: '' }, () => createSignalingServer({ turnPerMinute: 4, turnFetch: cf.fetch }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const rtcConfig = () => fetch(`http://127.0.0.1:${server.address().port}/rtc-config`).then(r => r.text());
+  const sockets = [], connect = async () => { const c = await turnClient(server); sockets.push(c.socket); return c; };
+  try {
+    assert.deepEqual(JSON.parse(await rtcConfig()), { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }] });
+    // Not a member: checks, failed joins and resumes, signals and nicknames never cause a request.
+    const outsider = await connect();
+    for (const msg of [{ type: 'check', code: '000000', token: 'x' }, { type: 'resume', code: '000000', token: 'x' }, { type: 'join', code: 'nope' }, { type: 'join', code: '000000' }, { type: 'signal', to: 'x', signal: {} }, { type: 'nickname', nickname: 'Eve' }]) outsider.send(msg);
+    await outsider.receive(m => m.type === 'error' && m.request === 'nickname');
+    assert.deepEqual(outsider.types(), ['welcome', 'available', 'resume-unavailable', 'error', 'error', 'error', 'error']); assert.equal(cf.issued.length, 0);
+
+    // The host alone in the lobby has nobody to connect to.
+    const host = await connect();
+    host.send({ type: 'create', name: 'Relay' }); host.send({ type: 'nickname', nickname: 'Host' }); host.send({ type: 'claim', role: 'Retailer' });
+    await host.receive(m => m.type === 'room' && m.room.members[0].role === 'Retailer');
+    assert.deepEqual(host.types(), ['welcome', 'session', 'room', 'room', 'room']); assert.equal(cf.issued.length, 0);
+    const { room } = host.messages[2];
+
+    // The first guest: the host's ice arrives before the room that lists them (its peer is created then), the guest's before its session.
+    const guest = await connect();
+    guest.send({ type: 'join', code: room.code });
+    await guest.receive(m => m.type === 'room');
+    await host.receive(m => m.type === 'room' && m.room.members.length === 2);
+    assert.deepEqual(host.types(), ['welcome', 'session', 'room', 'room', 'room', 'ice', 'room']);
+    assert.deepEqual(host.messages[5], { type: 'ice', iceServers: turnFor(1) });
+    assert.deepEqual(guest.types(), ['welcome', 'ice', 'session', 'room']);
+    assert.deepEqual(guest.messages[1].iceServers, turnFor(2));
+    const [{ url, init }] = cf.issued;
+    assert.equal(url, 'https://rtc.live.cloudflare.com/v1/turn/keys/key-id-4711/credentials/generate-ice-servers');
+    assert.deepEqual([init.method, init.headers, init.body, init.signal instanceof AbortSignal], ['POST', { Authorization: 'Bearer api-token-secret-4711', 'Content-Type': 'application/json' }, '{"ttl":10800}', true]);
+    // One request per connection: leaving (which revokes) and joining again on the same socket brings no second set.
+    guest.send({ type: 'leave' }); await host.receive(() => host.messages.filter(m => m.type === 'room' && m.room.members.length === 1).length === 4);
+    guest.send({ type: 'join', code: room.code });
+    await guest.receive(() => guest.messages.filter(m => m.type === 'room').length === 2);
+    assert.deepEqual(guest.types(), ['welcome', 'ice', 'session', 'room', 'session', 'room']); assert.equal(cf.issued.length, 2);
+    await until(() => cf.revoked.length === 1); assert.deepEqual(cf.names(), ['cf-user-2']);
+
+    // Both go offline. The guest resumes while the host is away: nothing; the host resumes: both get fresh credentials, the guest's before the room that shows the host online.
+    host.socket.terminate();
+    await guest.receive(m => m.type === 'room' && !m.room.members[0].online);
+    guest.socket.terminate();
+    const guestBack = await connect();
+    await sessionOf(guestBack, { type: 'resume', code: room.code, token: guest.messages[4].token });
+    await guestBack.receive(m => m.type === 'room');
+    assert.deepEqual(guestBack.types(), ['welcome', 'session', 'room']); assert.equal(cf.issued.length, 2);
+    const hostBack = await connect();
+    await sessionOf(hostBack, { type: 'resume', code: room.code, token: host.messages[1].token });
+    await guestBack.receive(m => m.type === 'room' && m.room.members[0].online);
+    assert.deepEqual(hostBack.types().slice(0, 3), ['welcome', 'ice', 'session']); assert.deepEqual(hostBack.messages[1].iceServers, turnFor(3));
+    assert.deepEqual(guestBack.types(), ['welcome', 'session', 'room', 'ice', 'room']); assert.deepEqual(guestBack.messages[3].iceServers, turnFor(4));
+    await until(() => cf.revoked.length === 2); assert.deepEqual(cf.names(), ['cf-user-2', 'cf-user-1']); // The host's, revoked when it disconnected.
+
+    // The cap (4 here, 120 a minute by default): later players get no ice, and one warning is logged.
+    for (const n of [1, 2]) {
+      const late = await connect();
+      late.send({ type: 'join', code: room.code });
+      await late.receive(m => m.type === 'room');
+      assert.deepEqual(late.types(), ['welcome', 'session', 'room'], `late player ${n}`);
+    }
+    assert.equal(cf.issued.length, 4);
+    assert.deepEqual(logs.lines, ['warn: Cloudflare TURN: 4 credentials issued this minute; further players use STUN only until the next minute.']);
+    // /rtc-config still never carries credentials.
+    const config = await rtcConfig();
+    assert.deepEqual(JSON.parse(config), { iceServers: [{ urls: ['stun:stun.cloudflare.com:3478'] }] });
+    for (const secret of secrets(4)) assert.ok(!config.includes(secret) && !logs.lines.join('\n').includes(secret), secret);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN revocation: leaving, a plain disconnect and the host closing the room revoke a credential, and a later removal, start without, expired reservation or resume revokes nothing more, so each is revoked exactly once; a credential that arrives after its member left is revoked, never sent', async () => {
+  const cf = fakeCloudflare({ delays: { 10: 200 } }), logs = captureLogs();
+  const { server, wss } = withEnv(cloudflareEnv, () => createSignalingServer({ reconnectMs: 300, turnFetch: cf.fetch }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sockets = [], connect = async () => { const c = await turnClient(server); sockets.push(c.socket); return c; };
+  const revokedNow = async (...names) => { await until(() => names.every(name => cf.names().includes(name))); await pause(50); assert.deepEqual(cf.names().slice(-names.length).sort(), names.sort()); };
+  try {
+    const host = await connect();
+    await sessionOf(host, { type: 'create', name: 'Revoke' });
+    const { room } = await host.receive(m => m.type === 'room');
+    host.send({ type: 'nickname', nickname: 'Host' }); host.send({ type: 'claim', role: 'Retailer' });
+    const players = {};
+    for (const [nickname, role] of [['Ada', 'Wholesaler'], ['Ben', 'Distributor'], ['Cy', 'Manufacturer']]) {
+      const player = players[nickname] = await connect();
+      player.id = (await sessionOf(player, { type: 'join', code: room.code })).id;
+      player.token = player.messages.find(m => m.type === 'session').token;
+      player.send({ type: 'nickname', nickname }); player.send({ type: 'claim', role });
+      await host.receive(m => m.type === 'room' && m.room.members.some(p => p.role === role));
+    }
+    assert.deepEqual(cf.issued.length, 4); assert.deepEqual(cf.revoked, []); // Host 1, Ada 2, Ben 3, Cy 4.
+    // Leaving the lobby.
+    players.Cy.send({ type: 'leave' });
+    await revokedNow('cf-user-4');
+    const [{ url, init }] = cf.revoked;
+    assert.equal(url, 'https://rtc.live.cloudflare.com/v1/turn/keys/key-id-4711/credentials/cf-user-4/revoke');
+    assert.deepEqual([init.method, init.headers, init.signal instanceof AbortSignal], ['POST', { Authorization: 'Bearer api-token-secret-4711' }, true]);
+    // A plain disconnect revokes at once; the host removing the player later revokes nothing more.
+    players.Ben.socket.close();
+    await revokedNow('cf-user-3');
+    const seen = host.messages.length;
+    host.send({ type: 'remove', id: players.Ben.id });
+    await until(() => host.messages.slice(seen).some(m => m.type === 'room' && m.room.members.length === 2));
+    await pause(50); assert.equal(cf.revoked.length, 2);
+    // Ada drops (revoked at once) and resumes: nothing more is revoked, and the new connection gets its own.
+    players.Ada.socket.terminate();
+    await revokedNow('cf-user-2');
+    let ada = await connect();
+    await sessionOf(ada, { type: 'resume', code: room.code, token: players.Ada.token });
+    assert.deepEqual(ada.messages[1], { type: 'ice', iceServers: turnFor(5) });
+    await pause(50); assert.equal(cf.revoked.length, 3);
+    // Start without: Dee (no role) disconnects, which revokes; the start then removes her and revokes nothing more.
+    const dee = await connect();
+    dee.id = (await sessionOf(dee, { type: 'join', code: room.code })).id;
+    dee.send({ type: 'nickname', nickname: 'Dee' });
+    await host.receive(m => m.type === 'room' && m.room.members.some(p => p.nickname === 'Dee'));
+    dee.socket.close();
+    await revokedNow('cf-user-6');
+    await host.receive(m => m.type === 'room' && m.room.members.some(p => p.id === dee.id && !p.online));
+    host.send({ type: 'started', without: [dee.id] });
+    await host.receive(m => m.type === 'room' && m.room.started);
+    await pause(50); assert.equal(cf.revoked.length, 4);
+    // Leaving a started Team game keeps the seat and revokes; the socket closing afterwards revokes nothing more.
+    const left = once(ada.socket, 'close');
+    ada.send({ type: 'leave' });
+    await revokedNow('cf-user-5');
+    await left; await pause(50); assert.equal(cf.revoked.length, 5);
+    // Ada returns and disconnects (revoked at once); her reservation then expires, which revokes nothing more.
+    ada = await connect();
+    await sessionOf(ada, { type: 'resume', code: room.code, token: players.Ada.token });
+    assert.deepEqual(ada.messages[1].iceServers, turnFor(7));
+    ada.socket.close();
+    await revokedNow('cf-user-7');
+    await host.receive(m => m.type === 'room' && m.room.members.some(p => p.id === players.Ada.id && p.connection === 3 && !p.online));
+    await pause(350);
+    host.send({ type: 'nickname', nickname: 'Again' }); // Any message runs the expiry check.
+    await host.receive(m => m.type === 'room' && m.room.started && !m.room.members.some(p => p.id === players.Ada.id));
+    await pause(50); assert.equal(cf.revoked.length, 6);
+
+    // A credential that arrives after its member left is revoked and never sent; then the host closes the room, revoking its own and every member's.
+    const hostB = await connect();
+    await sessionOf(hostB, { type: 'create', name: 'Close' });
+    const roomB = (await hostB.receive(m => m.type === 'room')).room;
+    const eve = await connect();
+    await sessionOf(eve, { type: 'join', code: roomB.code }); // HostB 8, Eve 9.
+    assert.deepEqual(eve.types().slice(0, 3), ['welcome', 'ice', 'session']); assert.deepEqual(eve.messages[1].iceServers, turnFor(9));
+    const fay = await connect();
+    fay.send({ type: 'join', code: roomB.code }); fay.send({ type: 'leave' }); // Fay's request (10) is answered after 200 ms.
+    await hostB.receive(() => hostB.messages.filter(m => m.type === 'room' && m.room.members.length === 2).length === 2);
+    await revokedNow('cf-user-10');
+    await fay.receive(m => m.type === 'room');
+    assert.deepEqual(fay.types(), ['welcome', 'session', 'room']);
+    hostB.send({ type: 'leave' });
+    await eve.receive(m => m.type === 'closed');
+    await revokedNow('cf-user-8', 'cf-user-9');
+    host.send({ type: 'leave' });
+    await revokedNow('cf-user-1');
+    // Every credential issued was revoked exactly once.
+    assert.equal(cf.issued.length, 10);
+    assert.deepEqual([...cf.names()].sort(), Array.from({ length: 10 }, (_, i) => `cf-user-${i + 1}`).sort());
+    for (const secret of secrets(10)) assert.ok(!logs.lines.join('\n').includes(secret), secret);
+    assert.deepEqual(logs.lines, []);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN: an old socket that closes after a resume replaced it revokes nothing; the old connection\'s credential is revoked once by the resume, the new one once when it disconnects', async () => {
+  const cf = fakeCloudflare(), logs = captureLogs();
+  const { server, wss } = withEnv(cloudflareEnv, () => createSignalingServer({ turnFetch: cf.fetch }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sockets = [], connect = async () => { const c = await turnClient(server); sockets.push(c.socket); return c; };
+  try {
+    const host = await connect();
+    await sessionOf(host, { type: 'create', name: 'Tabs' });
+    const { room } = await host.receive(m => m.type === 'room');
+    const ada = await connect();
+    const { token } = await sessionOf(ada, { type: 'join', code: room.code }); // Host 1, Ada 2.
+    // Ada resumes in a second tab while the first is still connected: the server closes the first (4001), whose close must not revoke the second tab's credential.
+    const closed = once(ada.socket, 'close');
+    const tab = await connect();
+    await sessionOf(tab, { type: 'resume', code: room.code, token });
+    assert.deepEqual(tab.messages[1], { type: 'ice', iceServers: turnFor(3) });
+    assert.equal((await closed)[0], 4001);
+    await until(() => cf.revoked.length === 1); await pause(100);
+    assert.deepEqual(cf.names(), ['cf-user-2']);
+    // The second tab disconnecting revokes its own, once.
+    tab.socket.close();
+    await until(() => cf.revoked.length === 2); await pause(50);
+    assert.deepEqual(cf.names(), ['cf-user-2', 'cf-user-3']);
+    for (const secret of secrets(3)) assert.ok(!logs.lines.join('\n').includes(secret), secret);
+    assert.deepEqual(logs.lines, []);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN revocation after the reveal: players\' credentials are revoked after the grace period (at once if they disconnect first), the host keeps its own while the finished room admits returning players, a returning player gets a fresh one, and the room expiring revokes the rest; nothing twice', async () => {
+  const cf = fakeCloudflare(), logs = captureLogs();
+  const { server, wss } = withEnv(cloudflareEnv, () => createSignalingServer({ revealGraceMs: 200, finishedMs: 800, turnFetch: cf.fetch }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sockets = [], connect = async () => { const c = await turnClient(server); sockets.push(c.socket); return c; };
+  try {
+    const host = await connect();
+    await sessionOf(host, { type: 'create', name: 'Reveal' });
+    const { room } = await host.receive(m => m.type === 'room');
+    host.send({ type: 'nickname', nickname: 'Host' }); host.send({ type: 'claim', role: 'Retailer' });
+    const players = [];
+    for (const [nickname, role] of [['Ada', 'Wholesaler'], ['Ben', 'Distributor'], ['Cy', 'Manufacturer']]) {
+      const player = await connect(); players.push(player);
+      player.token = (await sessionOf(player, { type: 'join', code: room.code })).token;
+      player.send({ type: 'nickname', nickname }); player.send({ type: 'claim', role });
+      await host.receive(m => m.type === 'room' && m.room.members.some(p => p.role === role));
+    }
+    const [ada, ben, cy] = players; // Host 1, Ada 2, Ben 3, Cy 4.
+    host.send({ type: 'started' }); await host.receive(m => m.type === 'room' && m.room.started);
+    ben.socket.close(); // Ben is away at the reveal: revoked when he disconnects.
+    await until(() => cf.names().includes('cf-user-3'));
+    // Only the host's finished message counts; the final snapshot still has time to arrive.
+    ada.send({ type: 'finished' }); host.send({ type: 'finished' });
+    await pause(60); assert.deepEqual(cf.names(), ['cf-user-3']);
+    // Ada disconnects during the grace period: revoked at once, while Cy still waits for it.
+    ada.socket.close();
+    await until(() => cf.names().includes('cf-user-2'));
+    assert.deepEqual(cf.names(), ['cf-user-3', 'cf-user-2']);
+    await until(() => cf.revoked.length === 3); await pause(50);
+    assert.deepEqual(cf.names(), ['cf-user-3', 'cf-user-2', 'cf-user-4']); // Cy's after the grace period; the host (1) keeps its own.
+    // Ben returns for the results: a fresh credential (the host, already issued on this connection, gets none).
+    const benBack = await connect();
+    await sessionOf(benBack, { type: 'resume', code: room.code, token: ben.token });
+    assert.deepEqual(benBack.messages[1], { type: 'ice', iceServers: turnFor(5) }); assert.equal(cf.issued.length, 5);
+    await pause(250); assert.equal(cf.revoked.length, 3); // Not revoked by the earlier grace period.
+    // The finished room expires: the host's and Ben's are revoked; nothing twice.
+    await pause(350); cy.send({ type: 'nickname', nickname: 'Again' }); // Any message runs the expiry check.
+    await until(() => cf.revoked.length === 5); await pause(50);
+    assert.deepEqual([...cf.names()].sort(), ['cf-user-1', 'cf-user-2', 'cf-user-3', 'cf-user-4', 'cf-user-5']);
+    for (const secret of secrets(5)) assert.ok(!logs.lines.join('\n').includes(secret), secret);
+    assert.deepEqual(logs.lines, []);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN revocation failures (HTTP error, network error, timeout) are logged once each without secrets or response text and never affect play', async () => {
+  const answers = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'denied api-token-secret-4711 cf-user-2' }] }), { status: 500, headers: { 'content-type': 'application/json' } }),
+    () => { throw new TypeError('fetch failed for Bearer api-token-secret-4711'); },
+    (init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))) // No answer: the 3-second timeout.
+  ];
+  const cf = fakeCloudflare({ revokeAnswer: (n, init) => answers[n - 1]?.(init) ?? new Response(null, { status: 204 }) }), logs = captureLogs(); // Later ones (the sockets closing at the end) succeed.
+  const { server, wss } = withEnv(cloudflareEnv, () => createSignalingServer({ turnFetch: cf.fetch }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sockets = [], connect = async () => { const c = await turnClient(server); sockets.push(c.socket); return c; };
+  try {
+    const host = await connect();
+    await sessionOf(host, { type: 'create', name: 'Still playing' });
+    const { room } = await host.receive(m => m.type === 'room');
+    host.send({ type: 'nickname', nickname: 'Host' }); host.send({ type: 'claim', role: 'Retailer' });
+    const players = [];
+    for (const [nickname, role] of [['Ada', 'Wholesaler'], ['Ben', 'Distributor']]) {
+      const player = await connect(); players.push(player);
+      player.token = (await sessionOf(player, { type: 'join', code: room.code })).token;
+      player.send({ type: 'nickname', nickname }); player.send({ type: 'claim', role });
+      await host.receive(m => m.type === 'room' && m.room.members.some(p => p.role === role));
+    }
+    // Ada and Ben drop and resume (their revocations: HTTP 500, then a network error); Ada does it again, and that revocation never answers.
+    const resume = async player => { player.socket.terminate(); const back = await connect(); back.token = player.token; await sessionOf(back, { type: 'resume', code: room.code, token: player.token }); await back.receive(m => m.type === 'room'); return back; };
+    let [ada, ben] = players;
+    ada = await resume(ada); ben = await resume(ben);
+    await until(() => logs.lines.length === 2);
+    const started = Date.now();
+    ada = await resume(ada);
+    assert.deepEqual(ada.messages[1].iceServers, turnFor(6)); // Fresh credentials despite the failures.
+    // Play carries on while that revocation is pending: the host starts, and signals pass both ways.
+    host.send({ type: 'started' });
+    await ada.receive(m => m.type === 'room' && m.room.started); await ben.receive(m => m.type === 'room' && m.room.started);
+    const adaId = ada.messages.find(m => m.type === 'session').id, hostId = host.messages.find(m => m.type === 'session').id;
+    ada.send({ type: 'signal', to: hostId, signal: { candidate: { candidate: 'a' } } }); host.send({ type: 'signal', to: adaId, signal: { candidate: { candidate: 'h' } } });
+    await host.receive(m => m.type === 'signal' && m.from === adaId); await ada.receive(m => m.type === 'signal' && m.from === hostId);
+    assert.ok(Date.now() - started < 2500, 'play did not wait for the revocation');
+    await until(() => logs.lines.length === 3, 5000);
+    assert.deepEqual(logs.lines, ['HTTP 500', 'request failed', 'timed out after 3 seconds'].map(reason => `warn: Cloudflare TURN credential not revoked (${reason}); it expires on its own.`));
+    assert.equal(cf.revoked.length, 3); // Never retried.
+    for (const secret of secrets(6)) assert.ok(!logs.lines.join('\n').includes(secret), secret);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN: a refused, failed, malformed or timed-out request sends nothing extra, logs one warning without secrets, and the player joins with STUN only', async () => {
+  const calls = [], logs = captureLogs();
+  const answers = [
+    () => new Response(JSON.stringify({ errors: [{ message: 'denied api-token-secret-4711' }] }), { status: 401, headers: { 'content-type': 'application/json' } }),
+    () => { throw new TypeError('fetch failed for Bearer api-token-secret-4711'); },
+    () => new Response('{"iceServers":[{"username":"cf-user-1","credential":"cf-credential-1"', { status: 201, headers: { 'content-type': 'application/json' } }),
+    () => new Response(JSON.stringify({ iceServers: [{ urls: ['turn:turn.cloudflare.com:53?transport=udp'], username: 'cf-user-2', credential: 'cf-credential-2' }] }), { status: 201 }),
+    (url, init) => new Promise((_, reject) => init.signal.addEventListener('abort', () => reject(init.signal.reason))) // No answer: the 3-second timeout.
+  ];
+  const { server, wss } = withEnv({ ...cloudflareEnv, TURN_TTL_SECONDS: '600' }, () => createSignalingServer({ turnFetch: async (url, init) => { calls.push(init); return answers[calls.length - 1](url, init); } }));
+  server.listen(0, '127.0.0.1'); await once(server, 'listening');
+  const sockets = [];
+  try {
+    const host = await turnClient(server); sockets.push(host.socket);
+    host.send({ type: 'create', name: 'No relay', kind: 'classroom', challenge: { role: 'Retailer', method: 'sma', seed: 1 } }); // Room for five.
+    const { room } = await host.receive(m => m.type === 'room');
+    // The first guest brings the host's request (HTTP 401) and their own; the next three guests one each.
+    for (let n = 2; n <= 5; n++) {
+      const guest = await turnClient(server); sockets.push(guest.socket);
+      const started = Date.now();
+      guest.send({ type: 'join', code: room.code });
+      await guest.receive(m => m.type === 'room');
+      if (n === 5) assert.ok(Date.now() - started >= 2900, 'session waits for the timeout');
+      assert.deepEqual(guest.types(), ['welcome', 'session', 'room']);
+      guest.send({ type: 'nickname', nickname: `Player ${n}` });
+      await guest.receive(m => m.type === 'room' && m.room.members.some(p => p.nickname === `Player ${n}`)); // The lobby carries on.
+    }
+    assert.ok(!host.types().includes('ice'));
+    assert.equal(calls[0].body, '{"ttl":600}');
+    assert.deepEqual([...logs.lines].sort(), ['HTTP 401', 'request failed', 'request failed', 'no TURN servers in the response', 'timed out after 3 seconds'].map(reason => `warn: Cloudflare TURN credentials unavailable (${reason}); the player continues with STUN only.`).sort());
+    for (const secret of secrets(2)) assert.ok(!logs.lines.join('\n').includes(secret), secret);
+  } finally {
+    logs.restore();
+    for (const socket of sockets) socket.terminate();
+    wss.close(); await new Promise(resolve => server.close(resolve));
+  }
+});
+
+test('Cloudflare TURN configuration: refused with static TURN_URLS or when incomplete; STUN_URLS overrides the Cloudflare STUN default; static TURN still works without Cloudflare', async () => {
+  assert.throws(() => withEnv({ ...cloudflareEnv, TURN_URLS: 'turn:relay.example:3478' }, createSignalingServer), /either Cloudflare TURN \(CLOUDFLARE_TURN_KEY_ID\) or static TURN_URLS, not both/);
+  assert.throws(() => withEnv({ CLOUDFLARE_TURN_KEY_ID: 'key-id-4711' }, createSignalingServer), /Set both CLOUDFLARE_TURN_KEY_ID and CLOUDFLARE_TURN_KEY_API_TOKEN/);
+  for (const ttl of ['six hours', '0', '1.5']) assert.throws(() => withEnv({ ...cloudflareEnv, TURN_TTL_SECONDS: ttl }, createSignalingServer), /TURN_TTL_SECONDS must be a whole number/);
+  for (const [env, iceServers] of [
+    [{ ...cloudflareEnv, STUN_URLS: 'stun:stun.example:3478' }, [{ urls: ['stun:stun.example:3478'] }]],
+    [{ TURN_URLS: 'turn:relay.example:3478,turns:relay.example:5349', TURN_USERNAME: 'self', TURN_PASSWORD: 'hosted' }, [{ urls: ['stun:stun.l.google.com:19302'] }, { urls: ['turn:relay.example:3478', 'turns:relay.example:5349'], username: 'self', credential: 'hosted' }]],
+    [{}, [{ urls: ['stun:stun.l.google.com:19302'] }]]
+  ]) {
+    const { server, wss } = withEnv(env, createSignalingServer);
+    server.listen(0, '127.0.0.1'); await once(server, 'listening');
+    try { assert.deepEqual(await fetch(`http://127.0.0.1:${server.address().port}/rtc-config`).then(r => r.json()), { iceServers }); }
+    finally { wss.close(); await new Promise(resolve => server.close(resolve)); }
+  }
+});

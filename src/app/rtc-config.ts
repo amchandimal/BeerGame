@@ -18,10 +18,16 @@ export async function loadRtcConfig(request: typeof fetch = fetch): Promise<RTCC
   let config: unknown;
   try { config = await response.json(); }
   catch { throw new Error(`Multiplayer configuration contains invalid JSON. ${setupHelp}`); }
-  if (!config || typeof config !== 'object' || !('iceServers' in config) || !Array.isArray(config.iceServers) ||
-    !config.iceServers.every(server => server && typeof server === 'object' &&
-      (typeof server.urls === 'string' && server.urls.length > 0 || Array.isArray(server.urls) && server.urls.length > 0 && server.urls.every((url: unknown) => typeof url === 'string' && url.length > 0)))) {
+  if (!config || typeof config !== 'object' || !('iceServers' in config) || !validIceServers(config.iceServers)) {
     throw new Error(`Multiplayer configuration is missing valid ICE server settings. ${setupHelp}`);
   }
   return config as RTCConfiguration;
+}
+export function validIceServers(servers: unknown): servers is RTCIceServer[] {
+  return Array.isArray(servers) && servers.every(server => server && typeof server === 'object' &&
+    (typeof server.urls === 'string' && server.urls.length > 0 || Array.isArray(server.urls) && server.urls.length > 0 && server.urls.every((url: unknown) => typeof url === 'string' && url.length > 0)));
+}
+/** Adds a member's short-lived TURN servers (the server's `ice` message) to the STUN servers from /rtc-config, replacing any earlier credentials. */
+export function withTurn(config: RTCConfiguration, turn: RTCIceServer[]): RTCConfiguration {
+  return { ...config, iceServers: [...(config.iceServers ?? []).filter(server => !server.username), ...turn] };
 }

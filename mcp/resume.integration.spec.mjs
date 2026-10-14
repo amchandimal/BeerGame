@@ -1340,6 +1340,7 @@ test('the host acknowledges each order: Sending, then accepted for week N while 
     for (const player of [host, alex, sam]) await atWeek(player, 3);
     assert.equal((await state(alex)).lastWeek.parties[0].order, 9);
     assert.equal((await state(host)).completedWeeks, 2);
+    await host.locator('.analytics tbody tr').nth(1).waitFor({ state: 'attached' }); // The ledger renders after the state reports week 3.
     assert.equal(await host.locator('.analytics tbody tr').count(), 2);
     assert.equal(await host.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.deepEqual(dialogs, []);
