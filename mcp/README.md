@@ -45,7 +45,7 @@ Set `BEER_GAME_HEADLESS=false` to see the AI's browser and the existing weekly a
 | Tool | Purpose |
 | --- | --- |
 | `beer_game_rules` | Read roles, costs, demand, lead times and workflow. Also available as `beer-game://rules`. |
-| `beer_game_create_single` | Select a role and start single-player; returns `sessionId`. |
+| `beer_game_create_single` | Select a role and start single-player, with optional `visibility` and `demand` (`{ method, seed }` or `"standard"`; random when omitted); returns `sessionId`. |
 | `beer_game_create_chain` | Create a named multiplayer lobby and reserve a role (`kind`: `team`, `classroom` or `groups`; a groups host takes no role); returns invitation details. |
 | `beer_game_join_chain` | Join with name, code and an available role (classroom and groups joins take no role). |
 | `beer_game_state` | Inspect phase, week, permitted parties, transit arrivals, costs, pending orders and connectivity. |
@@ -106,7 +106,7 @@ npm test
 npm run test:mcp
 ```
 
-The normal tests cover the engine, agent command checks, protocol tool discovery/schema validation and signaling. `test:mcp` starts an ephemeral local app/signaling server and a real stdio MCP subprocess, launches the configured headless browser, completes a single-player game, runs four WebRTC AI players through all 24 weeks, verifies a multiplayer chain with only the host and system roles, and covers role change, removal and starting without a disconnected lobby member. Set the browser environment variable before this test if using installed Edge/Chrome; otherwise install Chromium first. It does not use or stop an existing server on port 8787.
+The normal tests cover the engine, agent command checks, protocol tool discovery/schema validation and signaling. `test:mcp` starts an ephemeral local app/signaling server and a real stdio MCP subprocess, launches the configured headless browser, completes single-player games with random, reproduced (method and seed) and standard demand, runs four WebRTC AI players through all 24 weeks, verifies a multiplayer chain with only the host and system roles, and covers role change, removal and starting without a disconnected lobby member. Set the browser environment variable before this test if using installed Edge/Chrome; otherwise install Chromium first. It does not use or stop an existing server on port 8787.
 
 Built using the [official MCP TypeScript SDK's stdio transport](https://ts.sdk.modelcontextprotocol.io/server) and [Playwright browser contexts](https://playwright.dev/docs/browser-contexts).
 
@@ -137,6 +137,10 @@ Each group plays like a team game: `waitingFor`, `systemRoles`, `orderStatus` an
 ### Current-week demand
 
 All tools that return game state now include `currentDemand` while playing: `week`, `quantity`, `unit` (cases), `label`, `source`, `orderLeadTimeWeeks`, and `includesBacklog` (false). This matches the demand card above the order form. Retailer receives current customer demand; the other roles receive their downstream order arriving this week after the one-week delay. It remains available at every visibility level because it is the player's own incoming demand. Before play and after completion it is null. Existing `parties[].incoming` still describes the last completed week's demand; all existing response details are preserved.
+
+### Single-player demand
+
+`beer_game_create_single` uses the same random customer demand as the UI unless `demand` is given: a method (`sma`, `wma` or `cyclic`) chosen uniformly and a seed from 0 to 4294967295. Pass `demand: { "method": "wma", "seed": 123456789 }` to reproduce a game, or `demand: "standard"` for the classic 4 cases in weeks 1–4, then 8 (Team Supply Chain always uses that; classrooms use the host's scenario). It is end-customer demand, so a Wholesaler, Distributor or Manufacturer receives it through the system players' orders, and visibility applies as usual. `demandScenario` is null until the game is complete, as in the UI, then gives `method` (`standard` for the classic demand), `seed` (null for standard) and the UI's `label`, for example "Weighted moving average · seed 123456789". Exports during play are named `beer-game-single-player-…`; afterwards the filename carries the scenario, such as `beer-game-wma-seed-123456789-retailer-2026-10-18.csv`.
 
 ### Host-only classroom hosts
 

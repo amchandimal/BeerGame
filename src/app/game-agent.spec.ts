@@ -2,13 +2,15 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BeerGame } from './game';
 import { createGameAgent } from './game-agent';
+import { demandScenario, randomDemand, singleGame } from './challenge';
 
 function fixture() {
   const multi: any = { room: null, game: null, ready: false, isHost: false, submitted: false,
     error: '', status: 'Not connected', pending: {}, humanRoles: [], activeRoles: [], systemRoles: [], absences: [], replaced: false,
     connected: () => false, memberStatus: () => 'Ready', lobbySummary: '', awayMembers: [], startWithout: null, startReview: [], get chain() { return this.room; }, leave() { this.room = null; this.game = null; } };
-  const app: any = { mode: null, selected: null, game: null, multi, order: 4, error: '', inviteUrl: '',
-    start() { this.game = new BeerGame(this.selected); }, reset() { this.multi.leave(); this.mode = null; this.selected = null; this.game = null; } };
+  const app: any = { mode: null, selected: null, game: null, demand: null, multi, order: 4, error: '', inviteUrl: '',
+    start(demand = randomDemand()) { this.demand = demand === 'standard' ? null : demand; this.game = singleGame(this.selected, this.demand); }, // As AppComponent.start.
+    reset() { this.multi.leave(); this.mode = null; this.selected = null; this.game = null; } };
   return { app, agent: createGameAgent(app, () => {}) };
 }
 test('AI plays a complete single-player game and reads history/CSV without mutating state', async () => {
@@ -24,6 +26,32 @@ test('AI plays a complete single-player game and reads history/CSV without mutat
   assert.equal((await agent.command({ type: 'history' }) as any).history.length, 24);
   assert.equal((await agent.command({ type: 'export' }) as any).csv.split('\n').length, 97);
   await assert.rejects(agent.command({ type: 'order', week: 24, amount: 4 }), /no active game/);
+});
+test('AI single-player demand is random by default, reproducible with a method and seed or classic with standard, and named only once the game is complete', async () => {
+  const { app, agent } = fixture();
+  const played: any = await agent.command({ type: 'single', role: 'Wholesaler', demand: { method: 'wma', seed: 5, role: 'Retailer' } as any });
+  assert.deepEqual(app.demand, { method: 'wma', seed: 5 });
+  assert.equal(played.demandScenario, null);
+  for (let week = 1; week <= 23; week++) await agent.command({ type: 'order', week, amount: 6 });
+  assert.equal(agent.state().demandScenario, null, 'hidden during play');
+  assert.match((await agent.command({ type: 'export' }) as any).filename, /^beer-game-single-player-wholesaler-/);
+  const end: any = await agent.command({ type: 'order', week: 24, amount: 6 });
+  assert.deepEqual(end.demandScenario, { method: 'wma', seed: 5, label: 'Weighted moving average · seed 5' });
+  assert.deepEqual((await agent.command({ type: 'history' }) as any).history.map((row: any) => row.demand), demandScenario({ method: 'wma', seed: 5 }));
+  assert.match((await agent.command({ type: 'export' }) as any).filename, /^beer-game-wma-seed-5-wholesaler-\d{4}-\d{2}-\d{2}\.csv$/);
+  await agent.command({ type: 'leave' });
+  await agent.command({ type: 'single', role: 'Retailer', demand: 'standard' });
+  for (let week = 1; week <= 24; week++) await agent.command({ type: 'order', week, amount: 8 });
+  assert.deepEqual(agent.state().demandScenario, { method: 'standard', seed: null, label: 'Classic 4 → 8' });
+  assert.match((await agent.command({ type: 'export' }) as any).filename, /^beer-game-standard-retailer-/);
+  await agent.command({ type: 'leave' });
+  await agent.command({ type: 'single', role: 'Retailer' });
+  assert.ok(app.demand && app.game.customer.length === 24, 'random by default');
+  await agent.command({ type: 'leave' });
+  for (const demand of ['random', { method: 'ewma', seed: 1 }, { method: 'sma', seed: 1.5 }, { method: 'sma', seed: 4294967296 }, { method: 'cyclic' }]) {
+    await assert.rejects(agent.command({ type: 'single', role: 'Retailer', demand: demand as any }), /Demand must be/);
+    assert.equal(app.mode, null);
+  }
 });
 test('AI rejects stale and invalid orders without advancing, and refuses to replace an active session', async () => {
   const { agent } = fixture();
@@ -95,7 +123,7 @@ test('MCP current demand matches the decision week for every role and visibility
     for (const [role, source, amount] of [['Retailer', 'Customers', 8], ['Wholesaler', 'Retailer', 11], ['Distributor', 'Wholesaler', 17], ['Manufacturer', 'Distributor', 23]] as const) {
       const { app, agent } = fixture();
       assert.equal(agent.state().currentDemand, null);
-      await agent.command({ type: 'single', role, visibility });
+      await agent.command({ type: 'single', role, visibility, demand: 'standard' }); // The classic 4 → 8 customer demand.
       assert.equal(agent.state().currentDemand!.quantity, 4);
       if (role === 'Retailer') {
         for (let week = 1; week <= 4; week++) await agent.command({ type: 'order', week, amount: 4 });

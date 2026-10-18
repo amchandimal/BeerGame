@@ -3,11 +3,11 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { BeerGame, ROLES, Role, WEEKS } from './game';
 import { SupplySceneComponent } from './supply-scene';
-import { ChallengeConfig, DEMAND_METHODS, ScoreStatus } from './challenge';
+import { ChallengeConfig, DEMAND_METHODS, DemandConfig, ScoreStatus, randomDemand, singleGame } from './challenge';
 import { MultiplayerSession, Room, SaveCheck } from './multiplayer';
 import { createGameAgent } from './game-agent';
 import { InformationVisibility, VISIBILITY_OPTIONS, dataScope, visibleRoles, visibleCsv } from './visibility';
-import { debrief, resultsFilename } from './debrief';
+import { debrief, resultsFilename, scenarioLabel } from './debrief';
 import { joinCode, methodLabel } from './lobby';
 import { MAX_SAVES, SINGLE_KEY, SavedSession, SingleSave, TabPresence, changesSaves, readSingle, saveKey, tabHadSingle, writeSingle } from './saves';
 import { NavigationEnd, Router, RouterLink, RouterOutlet } from '@angular/router';
@@ -137,8 +137,8 @@ export class AppComponent {
   }
   endForEveryone(save: SavedSession) { if (confirm(`End ${save.room.name} · ${save.room.code} for everyone?`)) void this.multi.endForEveryone(save); }
   // A single-player game is saved after each week; a refresh of this tab restores it, and other tabs list it under Your games.
-  private saveSingle() { writeSingle(this.game, this.visibility); this.single = readSingle(); this.tabs.update(); }
-  private restoreSingle(save: SingleSave) { this.mode = 'single'; this.visibility = save.visibility; this.selected = save.game.player; this.game = save.game; this.order = 4; this.error = ''; }
+  private saveSingle() { writeSingle(this.game, this.visibility, this.demand); this.single = readSingle(); this.tabs.update(); }
+  private restoreSingle(save: SingleSave) { this.mode = 'single'; this.visibility = save.visibility; this.selected = save.game.player; this.game = save.game; this.demand = save.demand ?? null; this.order = 4; this.error = ''; }
   async resumeSingle() {
     const save = readSingle();
     if (!save) { this.single = null; return; }
@@ -164,6 +164,9 @@ export class AppComponent {
   icons = ['▤', '▦', '⇄', '⚙'];
   selected: Role | null = null;
   game: BeerGame | null = null;
+  // Single Player customer demand: a random scenario each game (null: the classic 4 → 8), kept hidden until the game is over.
+  demand: DemandConfig | null = null;
+  readonly scenarioLabel = scenarioLabel;
   order = 4;
   error = '';
   showRules = false;
@@ -216,7 +219,8 @@ export class AppComponent {
     this.tabs.update();
     this.cdr.markForCheck();
   }
-  start() { if (this.selected) { this.game = new BeerGame(this.selected); this.order = 4; this.error = ''; this.saveSingle(); } }
+  // MCP can pass a scenario to reproduce a game, or 'standard' for the classic demand.
+  start(demand: DemandConfig | 'standard' = randomDemand()) { if (this.selected) { this.demand = demand === 'standard' ? null : demand; this.game = singleGame(this.selected, this.demand); this.order = 4; this.error = ''; this.saveSingle(); } }
   startMultiplayer() { this.multi.start(); if (this.multi.startError) this.focusField(!this.multi.nickname ? '#nickname' : !this.multi.role && !this.multi.isChallenge ? '.lobby-roles .role-card:not([aria-disabled])' : ''); }
   get orderLocked() { return this.mode === 'multi' && (this.multi.submitted || this.multi.replaced); }
   get orderError() { return this.error || (this.mode === 'multi' && this.multi.errorField === 'order' ? this.multi.error : ''); }
@@ -257,7 +261,7 @@ export class AppComponent {
   // Classroom leaderboard find and filter, kept here so they survive switching views.
   playerSearch = '';
   statusFilter: ScoreStatus | '' = '';
-  private clearSession() { if (this.mode === 'single' && this.game) writeSingle(null, this.visibility); this.multi.leave(); this.mode = null; this.away = false; this.multiAction = 'choose'; this.game = null; this.selected = null; this.order = 4; this.error = ''; this.nickname = ''; this.single = readSingle(); this.tabs.update(); }
+  private clearSession() { if (this.mode === 'single' && this.game) writeSingle(null, this.visibility); this.multi.leave(); this.mode = null; this.away = false; this.multiAction = 'choose'; this.game = null; this.demand = null; this.selected = null; this.order = 4; this.error = ''; this.nickname = ''; this.single = readSingle(); this.tabs.update(); }
   reset() { this.clearSession(); void this.navigate('/'); }
   get live() { return !!(this.game || this.multi.room || this.multi.status === 'Connecting to supply chain…'); }
   // A run is over once complete, or when the creator finished the classroom before it was.
@@ -310,7 +314,7 @@ export class AppComponent {
   export() {
     if (!this.game) return;
     const url = URL.createObjectURL(new Blob([visibleCsv(this.game, this.dataVisibility, this.game.player)], { type: 'text/csv;charset=utf-8' }));
-    const a = document.createElement('a'); a.href = url; a.download = resultsFilename(this.game.player, this.mode === 'multi' ? this.multi.room : null); a.click(); URL.revokeObjectURL(url);
+    const a = document.createElement('a'); a.href = url; a.download = resultsFilename(this.game.player, this.mode === 'multi' ? this.multi.room : this.demand && !this.game.complete ? 'single-player' : this.demand); a.click(); URL.revokeObjectURL(url);
   }
   // The debrief needs the whole chain, so it waits for the reveal.
   get debrief() { return this.over && this.dataVisibility === 'network' ? debrief(this.game!) : null; }

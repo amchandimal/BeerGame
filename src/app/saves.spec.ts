@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BeerGame } from './game';
+import { demandScenario, singleGame } from './challenge';
 import { MAX_SAVES, SINGLE_KEY, SavedSession, changesSaves, readSaves, readSingle, removeSave, saveKey, tabHadSingle, writeSave, writeSingle } from './saves';
 
 // In-memory Storage; `quota` (characters) makes setItem fail as a full browser storage would.
@@ -80,7 +81,7 @@ test(`at most ${MAX_SAVES} multiplayer saves are kept, one per room and member, 
 test('an unfinished single-player game is saved with its visibility; a finished or invalid one is removed; the tab marker follows it', () => {
   const storage = new MemoryStorage(), tab = new MemoryStorage(), game = new BeerGame('Wholesaler');
   for (const order of [5, 9, 3]) game.advance(order);
-  assert.equal(writeSingle(game, 'dyadic', storage, tab), true);
+  assert.equal(writeSingle(game, 'dyadic', null, storage, tab), true);
   const restored = readSingle(storage)!;
   assert.equal(restored.visibility, 'dyadic');
   assert.ok(restored.game instanceof BeerGame);
@@ -89,17 +90,43 @@ test('an unfinished single-player game is saved with its visibility; a finished 
   assert.deepEqual(restored.game.parties, game.parties, 'the restored engine plays on identically');
   assert.equal(tabHadSingle(tab), true);
   while (!game.complete) game.advance(4);
-  writeSingle(game, 'dyadic', storage, tab);
+  writeSingle(game, 'dyadic', null, storage, tab);
   assert.equal(storage.getItem(SINGLE_KEY), null); assert.equal(tabHadSingle(tab), false);
-  writeSingle(new BeerGame('Retailer'), 'none', storage, tab);
-  writeSingle(null, 'none', storage, tab);
+  writeSingle(new BeerGame('Retailer'), 'none', null, storage, tab);
+  writeSingle(null, 'none', null, storage, tab);
   assert.equal(readSingle(storage), null); assert.equal(tabHadSingle(tab), false);
   for (const bad of ['{', JSON.stringify({ version: 1, visibility: 'everything', game: new BeerGame('Retailer') }), JSON.stringify({ version: 1, visibility: 'none', game: { ...new BeerGame('Retailer'), week: 3 } })]) {
     storage.setItem(SINGLE_KEY, bad);
     assert.equal(readSingle(storage), null);
     assert.equal(storage.getItem(SINGLE_KEY), null);
   }
-  assert.equal(writeSingle(new BeerGame('Retailer'), 'none', new MemoryStorage(10), tab), false);
+  assert.equal(writeSingle(new BeerGame('Retailer'), 'none', null, new MemoryStorage(10), tab), false);
+});
+
+test('a Single Player save keeps the customer series with its method and seed, so a restored game plays on with identical demand; older saves keep the classic demand', () => {
+  const storage = new MemoryStorage(), tab = new MemoryStorage(), demand = { method: 'cyclic' as const, seed: 3141592653 }, game = singleGame('Manufacturer', demand);
+  for (const order of [6, 2]) game.advance(order);
+  writeSingle(game, 'none', demand, storage, tab);
+  const restored = readSingle(storage)!;
+  assert.deepEqual(restored.demand, demand);
+  assert.deepEqual(restored.game.customer, demandScenario(demand));
+  assert.equal(restored.game.scenario, undefined);
+  while (!game.complete) { game.advance(5); restored.game.advance(5); }
+  assert.deepEqual(restored.game.history, game.history, 'the same demand, orders and costs to week 24');
+  // A save written before random demand has neither field and restores with 4 → 8.
+  const old = new BeerGame('Retailer');
+  for (const order of [4, 4]) old.advance(order);
+  storage.setItem(SINGLE_KEY, JSON.stringify({ version: 1, visibility: 'network', game: old, savedAt: 1 }));
+  const classic = readSingle(storage)!;
+  assert.equal(classic.demand, undefined); assert.equal(classic.game.customer, undefined);
+  assert.deepEqual([classic.game.currentDemand, classic.game.demand(5)], [4, 8]);
+  // A scenario without its series, a series without its scenario, or an unknown method is dropped.
+  const series = singleGame('Retailer', demand);
+  for (const bad of [{ game: old, demand }, { game: series }, { game: series, demand: { method: 'random', seed: 1 } }, { game: series, demand: { method: 'sma', seed: -1 } }]) {
+    storage.setItem(SINGLE_KEY, JSON.stringify({ version: 1, visibility: 'network', savedAt: 1, ...bad }));
+    assert.equal(readSingle(storage), null);
+    assert.equal(storage.getItem(SINGLE_KEY), null);
+  }
 });
 
 test('only storage events that add or remove a multiplayer save, or change the single-player save, refresh Your games', () => {

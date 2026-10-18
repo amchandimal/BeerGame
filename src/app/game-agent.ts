@@ -1,20 +1,21 @@
-import { ChallengeConfig } from './challenge';
+import { ChallengeConfig, DEMAND_METHODS, DemandConfig } from './challenge';
 import { BeerGame, ROLES, Role, WEEKS } from './game';
 import { type MultiplayerSession, type Room, chainView } from './multiplayer';
 import { InformationVisibility, VISIBILITY_LEVELS, dataScope, visibleRoles, visibleParties, visiblePending, visibleHistory, visibleCsv } from './visibility';
-import { debrief, resultsFilename } from './debrief';
+import { debrief, resultsFilename, scenarioLabel } from './debrief';
 
 interface AgentApp {
   mode: 'single' | 'multi' | null;
   selected: Role | null;
   game: BeerGame | null;
+  demand: DemandConfig | null; // Single Player scenario; null is the classic demand.
   multi: MultiplayerSession;
   order: number;
   error: string;
   inviteUrl: string;
   visibility?: InformationVisibility;
   reset(): void;
-  start(): void;
+  start(demand?: DemandConfig | 'standard'): void;
 }
 export interface AgentCommand {
   type: 'single' | 'create' | 'join' | 'start' | 'order' | 'state' | 'history' | 'export' | 'wait' | 'leave' | 'decide' | 'finish' | 'role' | 'remove' | 'createGroup' | 'joinGroup';
@@ -35,6 +36,7 @@ export interface AgentCommand {
   playerId?: string;
   groupName?: string; // createGroup
   group?: string; // joinGroup: a group's id or name; decide: the group (Classroom Group Challenge host)
+  demand?: DemandConfig | 'standard'; // single: reproduce a scenario, or the classic 4 → 8; random when omitted
 }
 
 // Opt-in API for dedicated MCP-owned pages. Uses the same engine and RTC session as the UI.
@@ -58,6 +60,8 @@ export function createGameAgent(app: AgentApp, refresh: () => void) {
       complete: game?.complete ?? false, teamCost: scope() === 'network' ? game?.totalCost ?? 0 : null,
       visibility: level(), visibleRoles: allowed, revealed: revealed(), revealedRoles: role && revealed() ? ROLES.filter(r => !visibleRoles(level(), role).includes(r)) : [],
       gameKind: app.mode === 'multi' ? multi.room?.kind ?? 'team' : 'single',
+      // Single Player demand, named only once the game is complete, as in the UI.
+      demandScenario: app.mode === 'single' && game?.complete ? { method: app.demand?.method ?? 'standard', seed: app.demand?.seed ?? null, label: scenarioLabel(app.demand) } : null,
       weeklyCosts: game?.weeklyCosts ?? null,
       leaderboard: app.mode === 'multi' && multi.isChallenge ? multi.leaderboard : [],
       classroomCounts: app.mode === 'multi' && multi.isChallenge && multi.room?.started ? multi.classroomCounts : null,
@@ -111,8 +115,10 @@ export function createGameAgent(app: AgentApp, refresh: () => void) {
           if (input.type !== 'join' && !(input.type === 'create' && input.kind === 'groups') && (!input.role || !ROLES.includes(input.role))) throw new Error('Choose a valid role.');
           if (input.visibility !== undefined && !VISIBILITY_LEVELS.includes(input.visibility)) throw new Error('Choose a valid information visibility level.');
           if (input.type === 'single') {
+            const d = input.demand;
+            if (d !== undefined && d !== 'standard' && !(DEMAND_METHODS.some(m => m.value === d?.method) && Number.isInteger(d.seed) && d.seed >= 0 && d.seed <= 4294967295)) throw new Error('Demand must be "standard" or a method (sma, wma or cyclic) with a seed from 0 to 4294967295.');
             app.visibility = input.visibility ?? 'network';
-            app.mode = 'single'; app.selected = input.role!; app.start();
+            app.mode = 'single'; app.selected = input.role!; app.start(d === undefined || d === 'standard' ? d : { method: d.method, seed: d.seed });
           } else {
             if (input.type === 'create' && (!input.name?.trim() || input.name.trim().length > 60)) throw new Error('Supply chain name must be 1–60 characters.');
             if (input.type === 'join' && !/^\d{6}$/.test(input.code ?? '')) throw new Error('Enter the six-digit game code.');
@@ -208,7 +214,7 @@ export function createGameAgent(app: AgentApp, refresh: () => void) {
         } else if (input.type === 'history' || input.type === 'export') {
           const game = app.mode === 'multi' ? app.multi.game : app.game;
           if (!game) throw new Error('There is no game yet.');
-          return input.type === 'history' ? { visibility: level(), revealed: revealed(), history: visibleHistory(game, scope(), game.player) } : { filename: resultsFilename(game.player, app.mode === 'multi' ? app.multi.room : null), mimeType: 'text/csv', csv: visibleCsv(game, scope(), game.player) };
+          return input.type === 'history' ? { visibility: level(), revealed: revealed(), history: visibleHistory(game, scope(), game.player) } : { filename: resultsFilename(game.player, app.mode === 'multi' ? app.multi.room : app.demand && !game.complete ? 'single-player' : app.demand), mimeType: 'text/csv', csv: visibleCsv(game, scope(), game.player) };
         } else if (input.type === 'decide') {
           // The host of a Classroom Group Challenge names the group (id or name); players decide only for their own.
           const group = app.multi.groups.find(g => g.id === input.group || g.name.toLowerCase() === input.group?.trim().toLowerCase());

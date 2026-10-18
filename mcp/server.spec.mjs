@@ -27,6 +27,12 @@ test('MCP discovers tools/resources, validates input, routes sessions and report
     const invalid = await client.callTool({ name: 'beer_game_order', arguments: { sessionId: id, week: 1, amount: 101 } });
     assert.equal(invalid.isError, true);
     assert.equal(calls.length, 1);
+    // Single-player demand: random when omitted, a method and seed to reproduce a game, or standard; anything else is refused before a session starts.
+    assert.deepEqual(calls[0], { type: 'single', role: 'Retailer' });
+    for (const demand of ['standard', { method: 'cyclic', seed: 4294967295 }]) await client.callTool({ name: 'beer_game_create_single', arguments: { role: 'Wholesaler', demand } });
+    assert.deepEqual(calls.splice(1), [{ type: 'single', role: 'Wholesaler', demand: 'standard' }, { type: 'single', role: 'Wholesaler', demand: { method: 'cyclic', seed: 4294967295 } }]);
+    for (const demand of ['random', { method: 'ewma', seed: 1 }, { method: 'sma', seed: -1 }, { method: 'wma', seed: 1.5 }, { method: 'sma' }]) assert.equal((await client.callTool({ name: 'beer_game_create_single', arguments: { role: 'Retailer', demand } })).isError, true, JSON.stringify(demand));
+    assert.equal(calls.length, 1);
     const order = await client.callTool({ name: 'beer_game_order', arguments: { sessionId: id, week: 1, amount: 4 } });
     assert.equal(order.structuredContent.week, 2);
     assert.deepEqual(calls[1], { id, type: 'order', week: 1, amount: 4 });

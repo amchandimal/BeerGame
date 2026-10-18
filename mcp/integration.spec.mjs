@@ -21,16 +21,39 @@ test('real stdio MCP plays single-player and four WebRTC players for 24 weeks', 
   try {
     await client.connect(transport);
     assert.equal((await client.listTools()).tools.length, 17);
+    // Default: a random seeded customer demand, named only once the game is complete.
     const single = await call('beer_game_create_single', { role: 'Manufacturer' });
-    for (let week = 1; week <= 24; week++) await call('beer_game_order', { sessionId: single.sessionId, week, amount: 4 });
+    assert.equal(single.demandScenario, null);
+    for (let week = 1; week <= 23; week++) await call('beer_game_order', { sessionId: single.sessionId, week, amount: 4 });
+    assert.equal((await call('beer_game_state', { sessionId: single.sessionId })).demandScenario, null);
+    assert.match((await call('beer_game_export', { sessionId: single.sessionId })).filename, /^beer-game-single-player-manufacturer-/);
+    await call('beer_game_order', { sessionId: single.sessionId, week: 24, amount: 4 });
     const end = await call('beer_game_state', { sessionId: single.sessionId });
+    const { method, seed, label } = end.demandScenario;
+    assert.ok(['sma', 'wma', 'cyclic'].includes(method) && Number.isInteger(seed) && seed >= 0 && seed <= 4294967295, JSON.stringify(end.demandScenario));
+    assert.ok(label.endsWith(` · seed ${seed}`), label);
+    assert.equal((await call('beer_game_export', { sessionId: single.sessionId })).filename.replace(/\d{4}-\d{2}-\d{2}\.csv$/, ''), `beer-game-${method}-seed-${seed}-manufacturer-`);
+    const randomDemand = (await call('beer_game_history', { sessionId: single.sessionId })).history.map(row => row.demand);
     assert.equal(end.completedWeeks, 24); assert.equal(end.complete, true);
     assert.equal((await call('beer_game_history', { sessionId: single.sessionId })).history.length, 24);
     assert.equal((await call('beer_game_export', { sessionId: single.sessionId })).csv.split('\n').length, 97);
     assert.equal(end.revealed, true); assert.deepEqual(end.revealedRoles, []); assert.equal(end.debrief.team.totalCost, end.teamCost);
     await call('beer_game_close', { sessionId: single.sessionId });
+    // A method and seed reproduce that game's customer demand; it reaches the Distributor through the system players' orders.
+    const seeded = [];
+    for (const role of ['Retailer', 'Distributor']) {
+      const again = await call('beer_game_create_single', { role, demand: { method, seed } });
+      for (let week = 1; week <= 24; week++) await call('beer_game_order', { sessionId: again.sessionId, week, amount: 6 });
+      const history = (await call('beer_game_history', { sessionId: again.sessionId })).history;
+      seeded.push(history);
+      assert.deepEqual(history.map(row => row.demand), randomDemand);
+      assert.deepEqual((await call('beer_game_state', { sessionId: again.sessionId })).demandScenario, { method, seed, label });
+      await call('beer_game_close', { sessionId: again.sessionId });
+    }
+    assert.deepEqual(seeded[0].map(row => row.parties[0].incoming), randomDemand);
+    assert.deepEqual(seeded[1].map(row => row.parties[2].incoming), [4, ...seeded[1].slice(0, -1).map(row => row.parties[1].order)]);
     // Single-player None: own role only until week 24 completes, then the whole chain, its team cost and the debrief.
-    const hidden = await call('beer_game_create_single', { role: 'Manufacturer', visibility: 'none' });
+    const hidden = await call('beer_game_create_single', { role: 'Manufacturer', visibility: 'none', demand: 'standard' }); // The classic 4 → 8.
     for (let week = 1; week <= 23; week++) await call('beer_game_order', { sessionId: hidden.sessionId, week, amount: week % 4 * 3 });
     const playing = await call('beer_game_state', { sessionId: hidden.sessionId });
     assert.deepEqual(playing.parties.map(p => p.role), ['Manufacturer']); assert.equal(playing.revealed, false);
@@ -44,6 +67,7 @@ test('real stdio MCP plays single-player and four WebRTC players for 24 weeks', 
     assert.ok((await call('beer_game_history', { sessionId: hidden.sessionId })).history.every(row => row.parties.length === 4 && row.demand !== null));
     const shownCsv = await call('beer_game_export', { sessionId: hidden.sessionId });
     assert.equal(shownCsv.csv.split('\n').length, 97); assert.match(shownCsv.filename, /^beer-game-standard-manufacturer-\d{4}-\d{2}-\d{2}\.csv$/);
+    assert.deepEqual(shown.demandScenario, { method: 'standard', seed: null, label: 'Classic 4 → 8' });
     await call('beer_game_close', { sessionId: hidden.sessionId });
     const host = await call('beer_game_create_chain', { name: 'MCP Integration Chain', role: 'Retailer' });
     const players = [host];

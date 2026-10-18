@@ -727,7 +727,7 @@ test('the saved-game card shows its check, keeps the save when the check cannot 
     assert.equal(await start.isDisabled(), true);
     assert.equal(await single.locator('#start-hint').innerText(), 'Choose a role above to start.');
     assert.equal(await start.getAttribute('aria-describedby'), 'start-hint');
-    await single.getByRole('radio', { name: /Retailer/ }).check();
+    await single.getByRole('radio', { name: /Wholesaler/ }).check(); // Week 1 at the Wholesaler is the same for every demand scenario.
     await single.locator('#start-hint').waitFor({ state: 'detached' });
     await start.click();
     await single.locator('#order').fill('4.5');
@@ -811,7 +811,7 @@ test('hidden information is revealed only after the game: week 24 in single-play
   try {
     // Single-player Dyadic: the Manufacturer stays hidden until week 24 completes.
     const single = await page(phone);
-    await command(single, { type: 'single', role: 'Wholesaler', visibility: 'dyadic' });
+    await command(single, { type: 'single', role: 'Wholesaler', visibility: 'dyadic', demand: 'standard' });
     for (let week = 1; week <= 23; week++) await command(single, { type: 'order', week, amount: week % 4 * 5 });
     assert.equal(await hiddenStations(single), 1);
     assert.equal((await exportCsv(single)).lines.length, 1 + 3 * 23);
@@ -1783,6 +1783,85 @@ test('an unfinished single-player game survives a refresh and keeps New game con
     await tab2.getByRole('button', { name: 'New game' }).click();
     await tab2.getByRole('link', { name: /Single Player/ }).waitFor();
     assert.equal(await single(tab2), null);
+    assert.deepEqual(h.errors, []);
+  } finally { await h.close(); }
+});
+
+test('Single Player demand follows a random seeded pattern each game, stays the same after a refresh and is named only once the game is over, on phones without overflow', { timeout: 180000 }, async () => {
+  const h = await savesHarness(), { origin, browser } = h;
+  const single = page => page.evaluate(() => JSON.parse(localStorage.getItem('beer-game.single.v1')));
+  const week = page => page.locator('.week-row > span').innerText();
+  const play = async (page, amount) => {
+    const before = await week(page);
+    await page.locator('#order').fill(String(amount));
+    await page.getByRole('button', { name: 'Play this week' }).click();
+    await page.waitForFunction(text => document.querySelector('.week-row > span')?.textContent !== text, before);
+  };
+  const demandCard = page => page.locator('.demand-value > strong').innerText();
+  try {
+    const context = await browser.newContext({ viewport: { width: 375, height: 812 } });
+    // Stubbed 32-bit draws (method, then seed), counted across refreshes: game 1 is wma seed 123456789, game 2 cyclic seed 987654321.
+    await context.addInitScript(draws => {
+      const real = crypto.getRandomValues.bind(crypto);
+      crypto.getRandomValues = array => {
+        if (!(array instanceof Uint32Array) || array.length !== 1) return real(array);
+        const next = Number(sessionStorage.getItem('test.draws')) || 0;
+        sessionStorage.setItem('test.draws', String(next + 1));
+        array[0] = draws[next % draws.length]; return array;
+      };
+    }, [1, 123456789, 2, 987654321]);
+    const page = h.watch(await context.newPage());
+    await page.emulateMedia({ reducedMotion: 'reduce' });
+    await page.goto(origin + '/single-player');
+    assert.equal(await page.locator('.setup-heading .hint').innerText(), 'Customer demand follows a randomly chosen pattern each game.');
+    await h.noOverflow(page);
+    await page.getByRole('radio', { name: /Retailer/ }).check();
+    await page.getByRole('button', { name: 'Start game' }).click();
+    const first = await single(page);
+    assert.deepEqual(first.demand, { method: 'wma', seed: 123456789 });
+    assert.equal(first.game.customer.length, 24);
+    assert.equal(first.game.scenario, undefined);
+    assert.equal(await demandCard(page), `${first.game.customer[0]} cases`);
+    for (const amount of [4, 6]) await play(page, amount);
+    // A refresh at week 3 continues with the same customer demand.
+    assert.equal(await week(page), 'Week 3 of 24');
+    assert.equal(await demandCard(page), `${first.game.customer[2]} cases`);
+    await page.reload();
+    await page.locator('.week-row > span', { hasText: 'Week 3 of 24' }).waitFor();
+    assert.equal(await demandCard(page), `${first.game.customer[2]} cases`);
+    assert.deepEqual([(await single(page)).demand, (await single(page)).game.customer], [first.demand, first.game.customer]);
+    // During play nothing names the pattern or seed, and an export says only single-player.
+    assert.doesNotMatch(await page.locator('main').innerText(), /seed|moving average|cyclic|123456789/i);
+    await page.locator('details.analytics > summary').click();
+    const [early] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Export CSV' }).click()]);
+    assert.match(early.suggestedFilename(), /^beer-game-single-player-retailer-\d{4}-\d{2}-\d{2}\.csv$/);
+    await page.locator('details.analytics > summary').click();
+    while (await week(page) !== '24 weeks completed') {
+      assert.equal(await demandCard(page), `${first.game.customer[(await single(page)).game.week - 1]} cases`);
+      await play(page, 8);
+    }
+    // The completion card, the debrief and the CSV name the scenario; the CSV has its customer demand.
+    assert.equal(await page.locator('.completion .scenario').innerText(), 'Demand: Weighted moving average · seed 123456789');
+    assert.equal(await page.locator('.debrief .debrief-note').first().innerText(), 'Demand: Weighted moving average · seed 123456789');
+    const [file] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: 'Download results' }).click()]);
+    assert.match(file.suggestedFilename(), /^beer-game-wma-seed-123456789-retailer-\d{4}-\d{2}-\d{2}\.csv$/);
+    const rows = (await readFile(await file.path(), 'utf8')).split('\n').slice(1).map(line => line.split(','));
+    assert.deepEqual(rows.filter(r => r[2] === 'Retailer').map(r => Number(r[1])), first.game.customer);
+    await h.noOverflow(page);
+    // A new game draws a different pattern and seed. A Dyadic Distributor, with the Retailer out of view, still sees no customer demand.
+    await page.getByRole('button', { name: 'New game' }).click();
+    await page.getByRole('link', { name: /Single Player/ }).click();
+    await page.getByRole('radio', { name: /^Dyadic/ }).check();
+    await page.getByRole('radio', { name: /Distributor/ }).check();
+    await page.getByRole('button', { name: 'Start game' }).click();
+    const second = await single(page);
+    assert.deepEqual(second.demand, { method: 'cyclic', seed: 987654321 });
+    assert.notDeepEqual(second.game.customer, first.game.customer);
+    await play(page, 5);
+    assert.equal(await page.locator('.station-note', { hasText: 'Demand information hidden' }).count(), 1);
+    assert.equal(await page.locator('.completion').count(), 0);
+    assert.doesNotMatch(await page.locator('main').innerText(), /seed|moving average|cyclic|987654321/i);
+    assert.deepEqual(h.dialogs, []);
     assert.deepEqual(h.errors, []);
   } finally { await h.close(); }
 });

@@ -1,5 +1,5 @@
-import { BeerGame, ROLES, Role } from './game';
-import type { ScoreRow } from './challenge';
+import { BeerGame, ROLES, Role, WEEKS } from './game';
+import { DEMAND_METHODS, type DemandConfig, type ScoreRow } from './challenge';
 import type { InformationVisibility } from './visibility';
 import type { Room } from './multiplayer';
 
@@ -11,7 +11,8 @@ export const SINGLE_KEY = 'beer-game.single.v1';
 const TAB_KEY = 'beer-game.tab'; // sessionStorage: this tab's single-player game, restored after a refresh of the same tab.
 // groupPending: a Classroom Group Challenge host's orders for each group's current week (challengeGames then holds the group chains).
 export interface SavedSession { version: 1; token: string; id: string; room: Room; savedAt: number; game: BeerGame | null; pending: Partial<Record<Role, number>>; challengeGames: [string, BeerGame][]; leaderboard: ScoreRow[]; challengeStarted: number; groupPending?: [string, Partial<Record<Role, number>>][]; }
-export interface SingleSave { version: 1; visibility: InformationVisibility; game: BeerGame; savedAt: number; }
+// demand: the scenario behind game.customer. Saves from before random demand have neither and keep the classic 4 → 8.
+export interface SingleSave { version: 1; visibility: InformationVisibility; game: BeerGame; savedAt: number; demand?: DemandConfig; }
 
 export const saveKey = (saved: { room: { code: string }; id: string }) => `${PREFIX}${saved.room.code}.${saved.id}`;
 // A storage event from another tab that changes Your games: a multiplayer save added or removed, or the single-player save changed.
@@ -59,16 +60,17 @@ export function readSingle(storage: Storage = globalThis.localStorage): SingleSa
   try {
     const saved = JSON.parse(storage.getItem(SINGLE_KEY) ?? 'null');
     if (!saved) return null;
-    const game = restoreGame(saved.game);
-    if (saved.version === 1 && game && !game.complete && ['network', 'dyadic', 'none'].includes(saved.visibility)) return { ...saved, game };
+    const game = restoreGame(saved.game), demand = saved.demand;
+    const scenario = demand === undefined ? game?.customer === undefined : DEMAND_METHODS.some(m => m.value === demand?.method) && Number.isInteger(demand.seed) && demand.seed >= 0 && demand.seed <= 4294967295 && game?.customer?.length === WEEKS;
+    if (saved.version === 1 && game && !game.complete && ['network', 'dyadic', 'none'].includes(saved.visibility) && scenario) return { ...saved, game };
   } catch { /* Invalid data is removed below. */ }
   try { storage.removeItem(SINGLE_KEY); } catch {}
   return null;
 }
 // Saves an unfinished single-player game (a finished one is removed). Returns false when storage refuses it.
-export function writeSingle(game: BeerGame | null, visibility: InformationVisibility, storage: Storage = globalThis.localStorage, tab: Storage | null = sessionStorageOrNull()) {
+export function writeSingle(game: BeerGame | null, visibility: InformationVisibility, demand: DemandConfig | null = null, storage: Storage = globalThis.localStorage, tab: Storage | null = sessionStorageOrNull()) {
   try {
-    if (game && !game.complete) { storage.setItem(SINGLE_KEY, JSON.stringify({ version: 1, visibility, game, savedAt: Date.now() } satisfies SingleSave)); tab?.setItem(TAB_KEY, 'single'); }
+    if (game && !game.complete) { storage.setItem(SINGLE_KEY, JSON.stringify({ version: 1, visibility, game, savedAt: Date.now(), ...demand ? { demand } : {} } satisfies SingleSave)); tab?.setItem(TAB_KEY, 'single'); }
     else { storage.removeItem(SINGLE_KEY); tab?.removeItem(TAB_KEY); }
     return true;
   } catch { return false; }

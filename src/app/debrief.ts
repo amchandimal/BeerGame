@@ -1,4 +1,6 @@
 import { BeerGame, Role, ROLES } from './game';
+import type { DemandConfig } from './challenge';
+import { methodLabel } from './lobby';
 
 export interface RoleDebrief { role: Role; orderSwing: number | null; orderStdDev: number; peakBacklog: number; holdingCost: number; backlogCost: number; totalCost: number; }
 export interface Debrief { weeks: number; demandStdDev: number; roles: RoleDebrief[]; team: { holdingCost: number; backlogCost: number; totalCost: number }; }
@@ -19,9 +21,13 @@ export function debrief(game: BeerGame): Debrief | null {
   return { weeks: game.history.length, demandStdDev, roles, team: { holdingCost: sum('holdingCost'), backlogCost: sum('backlogCost'), totalCost: game.totalCost } };
 }
 
-// Download name: room (or the standard scenario), role and local date, for example beer-game-sydney-class-482913-retailer-2026-10-11.csv.
-export function resultsFilename(role: Role, room: { name: string; code: string } | null, date = new Date()) {
-  const where = room ? [room.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, ''), room.code].filter(Boolean).join('-') : 'standard';
+// A Single Player game's demand, shown once it is over: "Weighted moving average · seed 123456789", or the classic demand (null).
+export const scenarioLabel = (demand: DemandConfig | null) => demand ? `${methodLabel(demand.method)} · seed ${demand.seed}` : 'Classic 4 → 8';
+
+// Download name: room (or the Single Player scenario, "single-player" while it is hidden, "standard" for the classic demand), role and local date,
+// for example beer-game-sydney-class-482913-retailer-2026-10-11.csv or beer-game-wma-seed-123456789-retailer-2026-10-11.csv.
+export function resultsFilename(role: Role, from: { name: string; code: string } | DemandConfig | 'single-player' | null, date = new Date()) {
+  const where = !from ? 'standard' : from === 'single-player' ? from : 'code' in from ? [from.name.toLowerCase().replace(/[^a-z0-9]+/g, '-').slice(0, 40).replace(/^-+|-+$/g, ''), from.code].filter(Boolean).join('-') : `${from.method}-seed-${from.seed}`;
   const day = [date.getFullYear(), date.getMonth() + 1, date.getDate()].map(n => String(n).padStart(2, '0')).join('-');
   return `beer-game-${where}-${role.toLowerCase()}-${day}.csv`;
 }

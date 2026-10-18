@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { BeerGame, ROLES } from './game';
 import { demandScenario } from './challenge';
-import { debrief, resultsFilename } from './debrief';
+import { debrief, resultsFilename, scenarioLabel } from './debrief';
 
 const stdDev = (values: number[]) => { const mean = values.reduce((a, b) => a + b, 0) / values.length; return Math.sqrt(values.reduce((s, v) => s + (v - mean) ** 2, 0) / values.length); };
 
@@ -39,4 +39,9 @@ test('results filenames name the room or scenario, the role and the local date',
   assert.equal(resultsFilename('Retailer', null, date), 'beer-game-standard-retailer-2026-10-11.csv');
   assert.equal(resultsFilename('Wholesaler', { name: '  Sydney Class #2! ', code: '482913' }, date), 'beer-game-sydney-class-2-482913-wholesaler-2026-10-11.csv');
   assert.equal(resultsFilename('Manufacturer', { name: '★★', code: '000123' }, new Date(2027, 0, 5)), 'beer-game-000123-manufacturer-2027-01-05.csv');
+  // Single Player: the scenario once the game is over, and only "single-player" while it is hidden.
+  assert.equal(resultsFilename('Distributor', { method: 'wma', seed: 123456789 }, date), 'beer-game-wma-seed-123456789-distributor-2026-10-11.csv');
+  assert.equal(resultsFilename('Retailer', { method: 'cyclic', seed: 0 }, date), 'beer-game-cyclic-seed-0-retailer-2026-10-11.csv');
+  assert.equal(resultsFilename('Retailer', 'single-player', date), 'beer-game-single-player-retailer-2026-10-11.csv');
+  assert.deepEqual([scenarioLabel({ method: 'wma', seed: 123456789 }), scenarioLabel({ method: 'sma', seed: 7 }), scenarioLabel(null)], ['Weighted moving average · seed 123456789', 'Simple moving average · seed 7', 'Classic 4 → 8']);
 });

@@ -1,4 +1,4 @@
-import { Role, WEEKS } from './game';
+import { BeerGame, Role, WEEKS } from './game';
 
 export type DemandMethod = 'sma' | 'wma' | 'cyclic';
 export interface ChallengeConfig { role: Role; seed: number; method: DemandMethod; }
@@ -25,6 +25,13 @@ export function demandScenario(config: DemandConfig): number[] {
     history.push(value); return value;
   });
 }
+
+// Single Player: a uniformly chosen method and a seed from 0 to 4294967295. `random` returns unsigned 32-bit integers; tests inject it.
+export function randomDemand(random = () => crypto.getRandomValues(new Uint32Array(1))[0]): DemandConfig {
+  return { method: DEMAND_METHODS[random() % DEMAND_METHODS.length].value, seed: random() };
+}
+// A Single Player game: the scenario is end-customer demand, which reaches other roles through the system players' orders as in a real chain. Null keeps the classic 4 → 8.
+export const singleGame = (role: Role, demand: DemandConfig | null) => new BeerGame(role, undefined, demand ? demandScenario(demand) : undefined);
 
 export interface ScoreRow {
   id: string; nickname: string; completedWeeks: number; cost: number | null;
